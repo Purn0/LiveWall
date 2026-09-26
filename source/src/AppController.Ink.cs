@@ -59,6 +59,7 @@ namespace LiveWall
             var failed = new List<string>();
             if (!Hotkeys.Register(window.Handle, HotkeyBoardId, settings.HotkeyBoard)) failed.Add(settings.HotkeyBoard);
             if (!Hotkeys.Register(window.Handle, HotkeyDrawId, settings.HotkeyDraw)) failed.Add(settings.HotkeyDraw);
+            if (failed.Count == 0) Log.Info("Shortcuts registered: board " + settings.HotkeyBoard + ", draw " + settings.HotkeyDraw);
             if (failed.Count > 0 && tray != null)
                 tray.ShowBalloon("Shortcut not available",
                     string.Join(" and ", failed) + (failed.Count == 1 ? " is" : " are") + " already used by another app. You can pick another in LiveWall Settings.", true);
@@ -265,10 +266,11 @@ namespace LiveWall
             Native.SetCoalescableTimer(window.Handle, TimerBoardDay, (uint)Math.Max(1000, Math.Min(ms, int.MaxValue)), IntPtr.Zero, 30000);
         }
 
-        // A new day: today's board becomes a fresh one (yesterday's is kept).
+        // A new day: today's board becomes a fresh one (yesterday's is kept). Also re-arms the midnight timer.
         void CheckBoardDay()
         {
-            if (board != BoardKind.Daily || !boardFollowsToday || boardDate == DateTime.Today || exiting) return;
+            if (board != BoardKind.Daily || !boardFollowsToday || exiting) return;
+            if (boardDate == DateTime.Today) { ScheduleBoardDay(); return; }
             if (editor != null && editor.IsBoard)
             {
                 Native.SetCoalescableTimer(window.Handle, TimerBoardDay, 60000, IntPtr.Zero, 5000);   // after the drawing is done
@@ -278,7 +280,17 @@ namespace LiveWall
             boardDate = DateTime.Today;
             boardDoc = OpenBoardDoc(BoardKind.Daily, boardDate);
             RenderBoard();
+            ScheduleBoardDay();
             UpdateStatus();
+        }
+
+        // Test hook (--debug-new-day): as if today's board had been opened yesterday, then the midnight check runs.
+        void SimulateNewDay()
+        {
+            if (board != BoardKind.Daily || !boardFollowsToday) { Log.Info("debug-new-day: today's board is not shown"); return; }
+            boardDate = DateTime.Today.AddDays(-1);
+            boardDoc = OpenBoardDoc(BoardKind.Daily, boardDate);
+            CheckBoardDay();
         }
 
         // ================================================================== drawing
@@ -311,12 +323,14 @@ namespace LiveWall
         {
             Bitmap b = InkRenderer.LoadImage(item.Kind == MediaKind.Image ? item.Path : SnapshotFor(item));
             if (b == null && item.Kind == MediaKind.Image && string.Equals(nativeCurrent, item.Path, StringComparison.OrdinalIgnoreCase))
-            {
-                // WebP, HEIC, AVIF...: GDI+ can't read them, but Windows keeps a JPEG copy of the current wallpaper.
-                b = InkRenderer.LoadImage(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    @"Microsoft\Windows\Themes\TranscodedWallpaper"));
-            }
+                b = InkRenderer.LoadImage(TranscodedWallpaperPath);
             return b;
+        }
+
+        // WebP, HEIC, AVIF...: GDI+ can't read them, but Windows keeps a JPEG copy of the current wallpaper.
+        static string TranscodedWallpaperPath
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Themes\TranscodedWallpaper"); }
         }
 
         void OpenEditor(InkDocument doc, bool isBoard, Image picture)
@@ -325,6 +339,7 @@ namespace LiveWall
             Rectangle mon = MonitorUnderCursor();
             string header = isBoard && board != null ? Boards.Header(board.Value, boardDate) : null;
             int seed = isBoard && board != null ? Boards.Seed(board.Value, boardDate) : 0;
+            SetEcoQos(false);   // full speed while drawing; Evaluate puts it back once the editor is gone
             try
             {
                 editor = new InkEditor(doc, isBoard, isBoard && board == BoardKind.Daily, mon, settings.UserId, header, seed, picture, settings.Fit);
@@ -417,7 +432,14 @@ namespace LiveWall
             if (strokes.Count == 0) return;
             if (!host.IsValid && !host.Refresh()) return;
             var screens = EnumerateMonitors().Select(m => new InkLayer.Screen { Bounds = m, BoundsInParent = host.ScreenToParent(m) }).ToList();
-            inkLayer.Show(host.Parent, host.InsertAfter, screens, strokes, doc.CanvasWidth, doc.CanvasHeight, () =>
+            var backdrop = new InkLayer.Backdrop
+            {
+                Path = current.Kind == MediaKind.Image ? current.Path : SnapshotFor(current),
+                Fallback = current.Kind == MediaKind.Image && string.Equals(nativeCurrent, current.Path, StringComparison.OrdinalIgnoreCase)
+                    ? TranscodedWallpaperPath : null,
+                Fit = settings.Fit
+            };
+            inkLayer.Show(host.Parent, host.InsertAfter, screens, strokes, doc.CanvasWidth, doc.CanvasHeight, backdrop, () =>
             {
                 // Players started meanwhile were put right under the icons, above the new ink: move them below it.
                 foreach (var s in surfaces)
@@ -425,6 +447,7 @@ namespace LiveWall
                     if (s.Player != null) s.Player.Show(SurfaceAnchor);
                     if (s.NextPlayer != null) s.NextPlayer.Show(SurfaceAnchor);
                 }
+                TrimSoon();   // the rendering's temporary bitmaps
             });
         }
 

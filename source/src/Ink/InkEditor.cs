@@ -33,6 +33,7 @@ namespace LiveWall.Ink
         public readonly InkDocument Document;
         public readonly bool IsBoard;
         public Rectangle Monitor { get; private set; }
+        public Rectangle HeaderBounds { get; private set; }   // the board's date (screen coordinates), kept clear by the toolbar
         public bool SwitchBoardRequested { get; private set; }
         public event EventHandler Finished;
 
@@ -147,7 +148,11 @@ namespace LiveWall.Ink
             {
                 InkRenderer.Prepare(g);
                 var r = new Rectangle(0, 0, Monitor.Width, Monitor.Height);
-                if (IsBoard) InkRenderer.DrawBackground(g, Document.Background, r, map, header, seed);
+                if (IsBoard)
+                {
+                    RectangleF h = InkRenderer.DrawBackground(g, Document.Background, r, map, header, seed);
+                    HeaderBounds = h.IsEmpty ? Rectangle.Empty : Rectangle.Round(new RectangleF(h.X + Monitor.Left, h.Y + Monitor.Top, h.Width, h.Height));
+                }
                 else if (picture != null) InkRenderer.DrawPicture(g, picture, r, fit);
                 else
                 {
@@ -675,7 +680,16 @@ namespace LiveWall.Ink
                 x += w;
             }
             ClientSize = new Size(x + pad, s + pad * 2);
-            Location = new Point(editor.Monitor.Left + (editor.Monitor.Width - ClientSize.Width) / 2, editor.Monitor.Top + (int)(18 * scale));
+            // Top centre; moved left of the board's date if it would cover it, or below the date if there's no room.
+            int gap = (int)(18 * scale);
+            var bar = new Rectangle(editor.Monitor.Left + (editor.Monitor.Width - ClientSize.Width) / 2, editor.Monitor.Top + gap, ClientSize.Width, ClientSize.Height);
+            Rectangle date = editor.HeaderBounds;
+            if (!date.IsEmpty && bar.IntersectsWith(Rectangle.Inflate(date, gap / 2, gap / 2)))
+            {
+                if (date.Left - gap - bar.Width >= editor.Monitor.Left + gap) bar.X = date.Left - gap - bar.Width;
+                else bar.Y = date.Bottom + gap;
+            }
+            Location = bar.Location;
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }

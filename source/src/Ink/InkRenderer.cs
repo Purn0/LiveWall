@@ -101,16 +101,18 @@ namespace LiveWall.Ink
 
         // Pens with constant pressure (mouse) and highlighters are drawn as one smooth polyline; pens with pressure as
         // round-capped segments whose width follows the pressure (the same way they are drawn live).
-        public static void DrawStroke(Graphics g, InkStroke s, InkMapping m)
+        // `opaque`: highlighters at full strength (the desktop ink layer applies their transparency to the whole window).
+        public static void DrawStroke(Graphics g, InkStroke s, InkMapping m, bool opaque = false)
         {
             if (s.Points.Length == 0) return;
-            DrawPoints(g, s.Tool, s.Argb, s.Width, s.Points, s.Points.Length, s.HasPressure, m);
+            DrawPoints(g, s.Tool, s.Argb, s.Width, s.Points, s.Points.Length, s.HasPressure, m, opaque);
         }
 
-        public static void DrawPoints(Graphics g, InkTool tool, int argb, float width, InkPoint[] pts, int count, bool pressure, InkMapping m)
+        public static void DrawPoints(Graphics g, InkTool tool, int argb, float width, InkPoint[] pts, int count, bool pressure, InkMapping m,
+                                      bool opaque = false)
         {
             if (count == 0) return;
-            Color color = StrokeColor(tool, argb);
+            Color color = opaque ? Color.FromArgb(255, Color.FromArgb(argb)) : StrokeColor(tool, argb);
             if (count == 1)
             {
                 float d = Math.Max(1f, width * (tool == InkTool.Highlighter ? 1 : PressureFactor(pts[0].P)) * m.Scale);
@@ -151,8 +153,10 @@ namespace LiveWall.Ink
 
         // ------------------------------------------------------------------ backgrounds
 
-        public static void DrawBackground(Graphics g, string style, Rectangle target, InkMapping m, string header, int seed)
+        // Returns where the header went (empty without one).
+        public static RectangleF DrawBackground(Graphics g, string style, Rectangle target, InkMapping m, string header, int seed)
         {
+            RectangleF headerRect = RectangleF.Empty;
             bool dark = IsDark(style);
             Color baseColor = dark ? Color.FromArgb(255, 0x22, 0x2E, 0x28) : Color.FromArgb(255, 0xF7, 0xF7, 0xF4);
             using (var b = new SolidBrush(baseColor)) g.FillRectangle(b, target);
@@ -163,7 +167,11 @@ namespace LiveWall.Ink
             {
                 // Faint chalk dust so it reads as a blackboard rather than a flat color.
                 // Soft-edged smudges (radial fade to nothing), like half-wiped chalk.
+                // Plain (not gamma-correct) blending: faint gradients then step by one level instead of three or four,
+                // which showed as rings, and it is several times faster.
                 var rnd = new Random(seed);
+                var quality = g.CompositingQuality;
+                g.CompositingQuality = CompositingQuality.AssumeLinear;
                 float unit = Math.Max(target.Width, target.Height) / 10f;
                 for (int i = 0; i < 26; i++)
                 {
@@ -174,12 +182,13 @@ namespace LiveWall.Ink
                         path.AddEllipse(x, y, w, h);
                         using (var br = new PathGradientBrush(path))
                         {
-                            br.CenterColor = Color.FromArgb(7 + rnd.Next(6), 255, 255, 255);
+                            br.CenterColor = Color.FromArgb((7 + rnd.Next(6)) * 2, 255, 255, 255);
                             br.SurroundColors = new[] { Color.FromArgb(0, 255, 255, 255) };
                             g.FillPath(br, path);
                         }
                     }
                 }
+                g.CompositingQuality = quality;
             }
             else if (style == "grid")
             {
@@ -212,9 +221,11 @@ namespace LiveWall.Ink
                     float x = target.Right - sz.Width - 56 * m.Scale, y = target.Top + 40 * m.Scale;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                     g.DrawString(header, font, br, x, y);
+                    headerRect = new RectangleF(x, y, sz.Width, sz.Height);
                 }
             }
             g.Restore(state);
+            return headerRect;
         }
 
         static float Mod(float a, float b) { float r = a % b; return r < 0 ? r + b : r; }

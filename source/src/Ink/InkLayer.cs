@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using LiveWall.Interop;
@@ -9,8 +11,11 @@ namespace LiveWall.Ink
 {
     // Shows a wallpaper's drawings behind the desktop icons, above the wallpaper (picture or video).
     //
-    // One small per-pixel-alpha layered child window per screen, sized to just the drawn area, filled once with
-    // UpdateLayeredWindow and never touched again: the compositor keeps the pixels, so it costs nothing while shown.
+    // Per screen, small color-keyed layered child windows sized to just the drawn area: one for pens (opaque) and one
+    // for highlighters (constant alpha). Painted once from a cached bitmap; the compositor keeps the pixels, so they
+    // cost nothing while shown. (Per-pixel-alpha children, i.e. UpdateLayeredWindow, are never drawn under Progman on
+    // Windows 11 24H2+; color key and constant alpha are.) A color key has no partial transparency, so pen edges are
+    // pre-blended with the wallpaper's picture (a video's first frame) to stay smooth.
     // The windows live on their own idle thread: a child of Explorer's desktop window ties its thread's input queue to
     // Explorer's, and that must never be LiveWall's UI thread.
     internal sealed class InkLayer : IDisposable
@@ -21,14 +26,29 @@ namespace LiveWall.Ink
             public RECT BoundsInParent;  // same area in the desktop window's client coordinates
         }
 
+        // Where a wallpaper's drawings go: its picture (or a video's first frame) as the wallpaper shows it.
+        public struct Backdrop
+        {
+            public string Path, Fallback;   // Fallback: used when GDI+ can't read Path (e.g. Windows' copy of a WebP)
+            public FitMode Fit;
+        }
+
+        sealed class Layer
+        {
+            public IntPtr Dc, Bitmap, Old;
+            public int Width, Height;
+        }
+
         const string ClassName = "LiveWall.Ink";
         const uint WM_RUN = Native.WM_APP + 60;
+        const int KeyArgb = unchecked((int)0xFFFF00FE);   // transparent color (no palette mix has zero green)
+        const uint KeyColorRef = 0x00FE00FF;
 
         readonly SynchronizationContext ui;
         readonly Thread thread;
         readonly Queue<Action> queue = new Queue<Action>();
         readonly ManualResetEvent started = new ManualResetEvent(false);
-        readonly List<IntPtr> windows = new List<IntPtr>();     // owned by the ink thread
+        readonly Dictionary<IntPtr, Layer> windows = new Dictionary<IntPtr, Layer>();   // owned by the ink thread
         WndProc proc;
         IntPtr messageWindow;
         int generation;                                          // UI thread: ignores results of superseded Show calls
@@ -62,7 +82,7 @@ namespace LiveWall.Ink
 
         // Replaces whatever is shown. `shown` runs on the UI thread with the new windows (topmost first).
         public void Show(IntPtr parent, IntPtr insertAfter, IList<Screen> screens, List<InkStroke> strokes, int canvasW, int canvasH,
-                         Action shown)
+                         Backdrop backdrop, Action shown)
         {
             int gen = ++generation;
             current = new List<IntPtr>();
@@ -72,11 +92,17 @@ namespace LiveWall.Ink
                 DestroyAll();
                 IntPtr after = insertAfter;
                 var made = new List<IntPtr>();
-                foreach (var s in screensCopy)
+                Bitmap picture = InkRenderer.LoadImage(backdrop.Path) ?? InkRenderer.LoadImage(backdrop.Fallback);
+                try
                 {
-                    IntPtr h = CreateLayer(parent, after, s, strokes, canvasW, canvasH);
-                    if (h != IntPtr.Zero) { made.Add(h); after = h; }
+                    foreach (var s in screensCopy)
+                        foreach (IntPtr h in CreateLayers(parent, after, s, strokes, canvasW, canvasH, picture, backdrop.Fit))
+                        {
+                            made.Add(h);
+                            after = h;
+                        }
                 }
+                finally { if (picture != null) picture.Dispose(); }
                 ui.Post(_ =>
                 {
                     if (gen != generation) return;
@@ -159,58 +185,193 @@ namespace LiveWall.Ink
                 {
                     case Native.WM_ERASEBKGND: return new IntPtr(1);
                     case Native.WM_NCHITTEST: return new IntPtr(Native.HTTRANSPARENT);
-                    case Native.WM_DESTROY: windows.Remove(hwnd); break;
+                    case Native.WM_PAINT:
+                    {
+                        // Only when shown or when Explorer invalidates the desktop: the compositor keeps the pixels.
+                        var ps = new byte[128];
+                        IntPtr dc = Native.BeginPaint(hwnd, ps);
+                        Layer l;
+                        if (dc != IntPtr.Zero && windows.TryGetValue(hwnd, out l)) InkNative.BitBlt(dc, 0, 0, l.Width, l.Height, l.Dc, 0, 0, InkNative.SRCCOPY);
+                        Native.EndPaint(hwnd, ps);
+                        return IntPtr.Zero;
+                    }
+                    case Native.WM_DESTROY:
+                    {
+                        Layer l;
+                        if (windows.TryGetValue(hwnd, out l)) { windows.Remove(hwnd); Free(l); }
+                        break;
+                    }
                 }
             }
             catch (Exception ex) { Log.Error("Ink layer WndProc", ex); }
             return Native.DefWindowProc(hwnd, msg, wParam, lParam);
         }
 
-        IntPtr CreateLayer(IntPtr parent, IntPtr insertAfter, Screen s, List<InkStroke> strokes, int canvasW, int canvasH)
+        // The pen window, then (below it) the highlighter window, for one screen.
+        List<IntPtr> CreateLayers(IntPtr parent, IntPtr insertAfter, Screen s, List<InkStroke> strokes, int canvasW, int canvasH,
+                                  Bitmap picture, FitMode fit)
         {
+            var made = new List<IntPtr>();
             int w = s.Bounds.Width, h = s.Bounds.Height;
-            if (w <= 0 || h <= 0 || !Native.IsWindow(parent)) return IntPtr.Zero;
+            if (w <= 0 || h <= 0 || !Native.IsWindow(parent)) return made;
             var m = InkMapping.Fill(canvasW, canvasH, w, h);
+            var pens = strokes.Where(st => st.Tool != InkTool.Highlighter).ToList();
+            var highlights = strokes.Where(st => st.Tool == InkTool.Highlighter).ToList();
+            IntPtr after = insertAfter;
+            Rectangle crop = Crop(pens, m, w, h);
+            if (!crop.IsEmpty)
+            {
+                IntPtr hwnd = CreateLayer(parent, after, s, crop, RenderPens(pens, m, crop, picture, fit, w, h), 255);
+                if (hwnd != IntPtr.Zero) { made.Add(hwnd); after = hwnd; }
+            }
+            crop = Crop(highlights, m, w, h);
+            if (!crop.IsEmpty)
+            {
+                IntPtr hwnd = CreateLayer(parent, after, s, crop, RenderHighlights(highlights, m, crop), InkRenderer.HighlighterAlpha);
+                if (hwnd != IntPtr.Zero) made.Add(hwnd);
+            }
+            return made;
+        }
 
-            // Only as big as the drawing: less for the compositor to blend while a video plays underneath.
+        // Only as big as the drawing: less memory, and less for the compositor to blend while a video plays underneath.
+        static Rectangle Crop(List<InkStroke> strokes, InkMapping m, int w, int h)
+        {
             RectangleF area = RectangleF.Empty;
             foreach (var st in strokes)
             {
                 RectangleF r = m.ToTarget(st.Bounds);
                 area = area.IsEmpty ? r : RectangleF.Union(area, r);
             }
+            if (area.IsEmpty) return Rectangle.Empty;
             Rectangle crop = Rectangle.Intersect(Rectangle.Round(RectangleF.Inflate(area, 3, 3)), new Rectangle(0, 0, w, h));
-            if (crop.Width <= 0 || crop.Height <= 0) return IntPtr.Zero;
+            return crop.Width > 0 && crop.Height > 0 ? crop : Rectangle.Empty;
+        }
 
+        IntPtr CreateLayer(IntPtr parent, IntPtr insertAfter, Screen s, Rectangle crop, int[] pixels, byte alpha)
+        {
+            Layer layer = MakeLayer(crop.Width, crop.Height, pixels);
+            if (layer == null) return IntPtr.Zero;
             IntPtr hwnd = Native.CreateWindowEx(
                 Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT | Native.WS_EX_NOACTIVATE | InkNative.WS_EX_NOPARENTNOTIFY,
                 ClassName, "LiveWall ink", Native.WS_CHILD | Native.WS_CLIPSIBLINGS | Native.WS_DISABLED,
                 s.BoundsInParent.Left + crop.Left, s.BoundsInParent.Top + crop.Top, crop.Width, crop.Height,
                 parent, IntPtr.Zero, Native.GetModuleHandle(IntPtr.Zero), IntPtr.Zero);
-            if (hwnd == IntPtr.Zero) { Log.Warn("Ink layer window: " + Marshal.GetLastWin32Error()); return IntPtr.Zero; }
-            windows.Add(hwnd);
-
-            using (var bmp = new LayeredBitmap(crop.Width, crop.Height))
+            if (hwnd == IntPtr.Zero) { Log.Warn("Ink layer window: " + Marshal.GetLastWin32Error()); Free(layer); return IntPtr.Zero; }
+            windows[hwnd] = layer;
+            if (!Native.SetLayeredWindowAttributes(hwnd, KeyColorRef, alpha, alpha == 255 ? Native.LWA_COLORKEY : Native.LWA_COLORKEY | Native.LWA_ALPHA))
             {
-                using (var g = bmp.CreateGraphics())
-                {
-                    g.TranslateTransform(-crop.Left, -crop.Top);
-                    InkRenderer.DrawStrokes(g, strokes, m);
-                }
-                if (!bmp.Present(hwnd, null, null))
-                {
-                    Log.Warn("Could not show drawings behind the desktop icons");
-                    Native.DestroyWindow(hwnd);
-                    return IntPtr.Zero;
-                }
+                Log.Warn("Could not show drawings behind the desktop icons: " + Marshal.GetLastWin32Error());
+                Native.DestroyWindow(hwnd);
+                return IntPtr.Zero;
             }
             Native.SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
             return hwnd;
         }
 
+        // Pens: solid ink, and its anti-aliased edges blended with the wallpaper underneath (hard edges without one).
+        static int[] RenderPens(List<InkStroke> strokes, InkMapping m, Rectangle crop, Bitmap picture, FitMode fit, int screenW, int screenH)
+        {
+            int[] ink = RenderStrokes(strokes, m, crop, false);
+            int[] blended = null;
+            if (picture != null)
+            {
+                using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        InkRenderer.Prepare(g);
+                        g.TranslateTransform(-crop.Left, -crop.Top);
+                        InkRenderer.DrawPicture(g, picture, new Rectangle(0, 0, screenW, screenH), fit);
+                        InkRenderer.DrawStrokes(g, strokes, m);
+                    }
+                    blended = Pixels(bmp);
+                }
+            }
+            for (int i = 0; i < ink.Length; i++)
+            {
+                int a = (ink[i] >> 24) & 0xFF;
+                if (blended != null) ink[i] = a < 24 ? KeyArgb : NotKey(blended[i] | unchecked((int)0xFF000000));
+                else ink[i] = a < 128 ? KeyArgb : NotKey(Unpremultiply(ink[i]));
+            }
+            return ink;
+        }
+
+        // Highlighters: opaque here; the window's constant alpha makes them translucent.
+        static int[] RenderHighlights(List<InkStroke> strokes, InkMapping m, Rectangle crop)
+        {
+            int[] px = RenderStrokes(strokes, m, crop, true);
+            for (int i = 0; i < px.Length; i++)
+                px[i] = ((px[i] >> 24) & 0xFF) < 128 ? KeyArgb : NotKey(Unpremultiply(px[i]));
+            return px;
+        }
+
+        static int[] RenderStrokes(List<InkStroke> strokes, InkMapping m, Rectangle crop, bool opaque)
+        {
+            using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    InkRenderer.Prepare(g);
+                    g.TranslateTransform(-crop.Left, -crop.Top);
+                    foreach (var st in strokes) InkRenderer.DrawStroke(g, st, m, opaque);
+                }
+                return Pixels(bmp);
+            }
+        }
+
+        static int[] Pixels(Bitmap bmp)
+        {
+            var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                var px = new int[bmp.Width * bmp.Height];
+                for (int y = 0; y < bmp.Height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, px, y * bmp.Width, bmp.Width);
+                return px;
+            }
+            finally { bmp.UnlockBits(data); }
+        }
+
+        static int Unpremultiply(int p)
+        {
+            int a = (p >> 24) & 0xFF;
+            if (a == 0 || a == 255) return p | unchecked((int)0xFF000000);
+            int r = Math.Min(255, ((p >> 16) & 0xFF) * 255 / a), g = Math.Min(255, ((p >> 8) & 0xFF) * 255 / a), b = Math.Min(255, (p & 0xFF) * 255 / a);
+            return unchecked((int)0xFF000000) | (r << 16) | (g << 8) | b;
+        }
+
+        static int NotKey(int p) { return p == KeyArgb ? p ^ 1 : p; }
+
+        static Layer MakeLayer(int w, int h, int[] pixels)
+        {
+            var layer = new Layer { Width = w, Height = h };
+            layer.Dc = InkNative.CreateCompatibleDC(IntPtr.Zero);
+            var bi = new BITMAPINFO { biSize = 40, biWidth = w, biHeight = -h, biPlanes = 1, biBitCount = 32 };
+            IntPtr bits;
+            layer.Bitmap = InkNative.CreateDIBSection(layer.Dc, ref bi, 0, out bits, IntPtr.Zero, 0);
+            if (layer.Bitmap == IntPtr.Zero || bits == IntPtr.Zero)
+            {
+                Log.Warn("Ink layer bitmap " + w + "x" + h + " could not be created");
+                InkNative.DeleteDC(layer.Dc);
+                return null;
+            }
+            layer.Old = InkNative.SelectObject(layer.Dc, layer.Bitmap);
+            Marshal.Copy(pixels, 0, bits, pixels.Length);
+            return layer;
+        }
+
+        static void Free(Layer l)
+        {
+            if (l.Dc == IntPtr.Zero) return;
+            InkNative.SelectObject(l.Dc, l.Old);
+            InkNative.DeleteObject(l.Bitmap);
+            InkNative.DeleteDC(l.Dc);
+            l.Dc = IntPtr.Zero;
+        }
+
         void DestroyAll()
         {
-            foreach (IntPtr h in windows.ToArray()) if (Native.IsWindow(h)) Native.DestroyWindow(h);
+            foreach (IntPtr h in windows.Keys.ToArray()) if (Native.IsWindow(h)) Native.DestroyWindow(h);
+            foreach (Layer l in windows.Values) Free(l);   // windows Explorer already destroyed
             windows.Clear();
         }
 

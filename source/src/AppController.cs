@@ -648,10 +648,10 @@ namespace LiveWall
         {
             Native.KillTimer(window.Handle, TimerEvaluateSoon);
             if (exiting) return;
+            SetEcoQos(editor == null);   // efficiency mode, except while someone is drawing (pen latency)
             if (currentVideo == null || surfaces.Count == 0)
             {
                 pauseReason = "";
-                SetEcoQos(true);
                 UpdateStatus();
                 return;
             }
@@ -886,7 +886,7 @@ namespace LiveWall
             else if (id == TimerRetry) { Native.KillTimer(window.Handle, TimerRetry); RetryVideo(); }
             else if (id == TimerTrim) { Native.KillTimer(window.Handle, TimerTrim); Trim(); }
             else if (id == TimerStart) { Native.KillTimer(window.Handle, TimerStart); OnStart(); }
-            else if (id == TimerBoardDay) { Native.KillTimer(window.Handle, TimerBoardDay); CheckBoardDay(); ScheduleBoardDay(); }
+            else if (id == TimerBoardDay) { Native.KillTimer(window.Handle, TimerBoardDay); CheckBoardDay(); }
         }
 
         void OnStart()
@@ -927,6 +927,7 @@ namespace LiveWall
                 case "debug-occlusion=visible": debugOcclusion = "visible"; Evaluate(); break;
                 case "debug-occlusion=hidden": debugOcclusion = "hidden"; Evaluate(); break;
                 case "debug-occlusion=auto": debugOcclusion = null; Evaluate(); break;
+                case "debug-new-day": SimulateNewDay(); break;
                 default: ShowSettings(); break;
             }
         }
@@ -959,7 +960,8 @@ namespace LiveWall
                 VideoPlayer p = isNext ? s.NextPlayer : (s.Player != null && s.Player.Id == playerId ? s.Player : null);
                 if (p == null) continue;
                 p.OnHostEvent(evt, data);
-                if (evt == PlayerHost.EVT_FIRST_FRAME && isNext)
+                if (evt == PlayerHost.EVT_READY && inkLayer.Last != IntPtr.Zero) p.Show(SurfaceAnchor);   // below drawings made meanwhile
+                else if (evt == PlayerHost.EVT_FIRST_FRAME && isNext)
                 {
                     s.NextReadyAt = DateTime.UtcNow;
                     Native.SetTimer(window.Handle, TimerPromote, (uint)PromoteDelay.TotalMilliseconds + 20, IntPtr.Zero);

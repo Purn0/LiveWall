@@ -7,7 +7,7 @@ using LiveWall.Interop;
 namespace LiveWall.Ink
 {
     // A 32-bit premultiplied DIB that GDI+ draws into directly and UpdateLayeredWindow presents without any copy:
-    // per-pixel-alpha windows (the drawing editor and the ink layer under the desktop icons).
+    // the drawing editor's per-pixel-alpha top-level window. (Not usable for children of the desktop; see InkLayer.)
     internal sealed class LayeredBitmap : IDisposable
     {
         public readonly int Width, Height;
@@ -162,6 +162,8 @@ namespace LiveWall.Ink
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
         [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+        public const uint SRCCOPY = 0x00CC0020;
 
         [DllImport("user32.dll", SetLastError = true)] public static extern bool GetPointerType(uint pointerId, out uint type);
         [DllImport("user32.dll", SetLastError = true)] public static extern bool GetPointerInfo(uint pointerId, out POINTER_INFO info);
