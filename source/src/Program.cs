@@ -11,6 +11,7 @@ namespace LiveWall
     {
         // Usage: LiveWall.exe [--autostart] [--settings|--next|--prev|--pause|--resume|--toggle-pause|--add|--exit|--status]
         //                     [--board|--daily-board|--permanent-board|--wallpaper|--draw]
+        //                     [--music-settings|--music-toggle|--music-pause|--music-play|--music-next|--music-volume=N]
         //                     [--restore-wallpaper] [--data <dir>] [--verbose]
         [STAThread]
         static int Main(string[] args)
@@ -22,6 +23,14 @@ namespace LiveWall
                 AppPaths.Init(d > 0 && d + 1 < args.Length ? args[d + 1] : null);
                 Log.Init(AppPaths.LocalDir);
                 return PlayerHost.Run(args);
+            }
+            if (args.Length >= 3 && args[0] == "--music")
+            {
+                // Music host process (started by the running LiveWall; see MusicHost).
+                int d = Array.IndexOf(args, "--data");
+                AppPaths.Init(d > 0 && d + 1 < args.Length ? args[d + 1] : null);
+                Log.Init(AppPaths.LocalDir);
+                return MusicHost.Run(args);
             }
 
             string command = null, dataDir = null;

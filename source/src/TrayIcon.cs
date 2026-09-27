@@ -32,9 +32,12 @@ namespace LiveWall
             icon.Visible = true;
         }
 
-        public void SetStatus(string text, bool paused)
+        // music: the track playing (second line of the tooltip), or null.
+        public void SetStatus(string text, string music, bool paused)
         {
-            string t = text.Length > 63 ? text.Substring(0, 60) + "..." : text;   // NotifyIcon limit
+            string line2 = music == null ? "" : "\n\u266A " + (music.Length > 30 ? music.Substring(0, 28) + "..." : music);
+            int room = 63 - line2.Length;   // NotifyIcon limit
+            string t = (text.Length > room ? text.Substring(0, room - 3) + "..." : text) + line2;
             if (icon.Text != t) icon.Text = t;
             Icon want = paused ? pausedIcon : normalIcon;
             if (icon.Icon != want) icon.Icon = want;
@@ -56,6 +59,7 @@ namespace LiveWall
             menu.MenuItems.Add(new MenuItem("Previous wallpaper", (s, e) => app.Previous()) { Enabled = several });
             menu.MenuItems.Add(new MenuItem(app.UserPaused ? "Resume" : "Pause", (s, e) => app.TogglePause()) { Enabled = app.HasLiveWallpaper || app.UserPaused });
             AddCollectionItems();
+            AddMusicItems();
             menu.MenuItems.Add("-");
             AddBoardItems();
             menu.MenuItems.Add("-");
@@ -111,6 +115,47 @@ namespace LiveWall
             menuItem.MenuItems.Add(new MenuItem("Edit collections...", (s, e) => app.ShowCollections()));
             menu.MenuItems.Add(menuItem);
         }
+
+        void AddMusicItems()
+        {
+            var music = new MenuItem("Music");
+            music.MenuItems.Add(new MenuItem(Shorten(app.MusicStatus, 60).Replace("&", "&&")) { Enabled = false });
+            music.MenuItems.Add("-");
+            music.MenuItems.Add(new MenuItem(app.MusicMuted ? "Play" : "Pause", (s, e) => app.ToggleMusicMute()));
+            music.MenuItems.Add(new MenuItem("Next track", (s, e) => app.NextTrack()) { Enabled = app.CanSkipTrack });
+            var volume = new MenuItem("Volume");
+            foreach (int v in new[] { 25, 50, 75, 100 })
+            {
+                int level = v;
+                volume.MenuItems.Add(new MenuItem(v + "%", (s, e) => app.SetMusicVolume(level)) { RadioCheck = true, Checked = app.MusicVolume == v });
+            }
+            music.MenuItems.Add(volume);
+            music.MenuItems.Add(new MenuItem("Silence while other apps play sound", (s, e) => app.ToggleMusicSilenceForOtherAudio())
+                { Checked = app.MusicSilencesForOtherAudio });
+            music.MenuItems.Add("-");
+            if (app.HasMusicTarget)
+            {
+                string mine = app.CurrentWallpaperMusic;
+                string kind = mine == null ? MusicSpec.Default : MusicSpec.Kind(mine);
+                var forThis = new MenuItem("For this wallpaper");
+                forThis.MenuItems.Add(new MenuItem("Default (" + MusicSpec.Describe(app.MusicDefault) + ")", (s, e) => app.SetCurrentWallpaperMusic(null))
+                    { RadioCheck = true, Checked = kind == MusicSpec.Default });
+                foreach (string k in new[] { MusicSpec.None, MusicSpec.Random, MusicSpec.Theme, MusicSpec.Video })
+                {
+                    string spec = k;
+                    forThis.MenuItems.Add(new MenuItem(MusicSpec.Describe(spec), (s, e) => app.SetCurrentWallpaperMusic(spec)) { RadioCheck = true, Checked = kind == spec });
+                }
+                if (kind == MusicSpec.Custom)
+                    forThis.MenuItems.Add(new MenuItem(Shorten(MusicSpec.Describe(mine), 60).Replace("&", "&&")) { RadioCheck = true, Checked = true, Enabled = false });
+                forThis.MenuItems.Add(new MenuItem("Choose music files...", (s, e) => app.ChooseCurrentWallpaperMusicFiles(null)));
+                forThis.MenuItems.Add(new MenuItem("Choose a music folder...", (s, e) => app.ChooseCurrentWallpaperMusicFolder(IntPtr.Zero)));
+                music.MenuItems.Add(forThis);
+            }
+            music.MenuItems.Add(new MenuItem("Music settings...", (s, e) => app.ShowMusicSettings()));
+            menu.MenuItems.Add(music);
+        }
+
+        static string Shorten(string s, int max) { return s.Length <= max ? s : s.Substring(0, max - 3) + "..."; }
 
         void AddBoardItems()
         {

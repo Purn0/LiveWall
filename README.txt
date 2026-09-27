@@ -52,6 +52,19 @@ Boards and drawing
   still, transparent layer the graphics chip blends in. The drawing window uses memory only while it is open.
 - Drawing data: %APPDATA%\LiveWall\boards and %APPDATA%\LiveWall\ink (plain text, one line per element).
 
+Music
+- Settings > Music... (or tray icon > Music > Music settings...): music for all wallpapers, and for the one shown:
+  None, Random (shuffles your music folder), By theme (the picture's mood: calm, energetic, dark, happy, dreamy or
+  cozy - put music in subfolders with those names; otherwise the whole folder plays), The video's own sound (the
+  video wallpaper's soundtrack), or Custom files / a folder. Off (None) until you choose.
+- It fades out when another app plays sound (a video, a call, a game), when the PC is locked, the screen is off
+  or asleep, and (settings) during fullscreen apps, on battery or with Energy Saver. A few seconds later the music
+  player closes completely, so the sound card and the PC can go idle. When things are quiet again it comes back
+  from the same place with a fade-in. Changing to a wallpaper with other music fades over to it.
+- Tray icon > Music: Play/Pause, Next track, Volume, "Silence while other apps play sound", For this wallpaper.
+- Optional: "Ask AI (Claude) for the mood" sends each wallpaper's picture once to Anthropic with your own API key
+  (stored encrypted for your Windows account). Off by default; without it the mood comes from the colors.
+
 What it does to save battery
 - Pictures are handed to Windows as a normal wallpaper: no cost at all while shown.
 - Videos are decoded and scaled by the graphics chip (hardware decoding), always muted, with no per-frame

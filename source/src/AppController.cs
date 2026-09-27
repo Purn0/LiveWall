@@ -225,6 +225,7 @@ namespace LiveWall
             s.Collections = old.Collections;          // edited in the Collections window
             s.ActiveCollection = old.ActiveCollection;
             s.UserId = old.UserId;
+            s.Music = old.Music;                      // edited in the Music window and the tray
             settings = s;
             settings.Save();
 
@@ -333,6 +334,7 @@ namespace LiveWall
                 currentVideo = null;
                 TearDownSurfaces();
                 RefreshInkOverlays();
+                UpdateMusic();
                 UpdateStatus();
                 return;
             }
@@ -403,6 +405,7 @@ namespace LiveWall
                 if (item.Kind == MediaKind.Gif && !item.StaticGif) ConvertGif(item, true);
             }
             Prefetch(PeekNext());
+            UpdateMusic();
             UpdateStatus();
         }
 
@@ -587,6 +590,7 @@ namespace LiveWall
             currentVideo = null;
             TearDownSurfaces();
             RefreshInkOverlays();
+            UpdateMusic();
             UpdateStatus();
         }
 
@@ -658,6 +662,7 @@ namespace LiveWall
             if (currentVideo == null || surfaces.Count == 0)
             {
                 pauseReason = "";
+                UpdateMusic();
                 UpdateStatus();
                 return;
             }
@@ -669,6 +674,7 @@ namespace LiveWall
                 for (int i = 0; i < occ.Covered.Length; i++) occ.Covered[i] = debugOcclusion == "hidden";
                 occ.FullscreenApp = false;
             }
+            UpdateMusic();
             string globalReason = power.SessionLocked ? "locked" : power.DisplayOff ? "screen off" : power.Suspending ? "sleeping"
                 : ScreenSaverRunning() ? "screen saver" : (settings.PauseOnFullscreen && occ.FullscreenApp) ? "fullscreen app" : null;
             string visibleReason = userPaused ? "paused" : (settings.PauseOnBattery && power.OnBattery) ? "on battery"
@@ -819,7 +825,7 @@ namespace LiveWall
             else if (pauseReason.Length > 0) { text = current.Name + " - paused (" + pauseReason + ")"; paused = true; }
             else text = current.Name;
             if (userPaused) paused = true;
-            if (tray != null) tray.SetStatus("LiveWall: " + text, paused);
+            if (tray != null) tray.SetStatus("LiveWall: " + text, MusicPlaying ? MusicTrackTitle : null, paused);
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 string detail = board != null ? "Showing " + text.Substring(0, 1).ToLowerInvariant() + text.Substring(1) : current == null ? text
@@ -847,6 +853,13 @@ namespace LiveWall
                     return IntPtr.Zero;
                 case PlayerHost.WM_HOST_EVENT:
                     OnHostEvent((int)(wParam.ToInt64() & 0xFFFFFF), (int)(wParam.ToInt64() >> 24), lParam.ToInt64());
+                    return IntPtr.Zero;
+                case MusicHost.WM_MUSIC_EVENT:
+                    OnMusicEvent((int)(wParam.ToInt64() & 0xFFFFFF), (int)(wParam.ToInt64() >> 24),
+                        (int)(lParam.ToInt64() >> 32), (int)(lParam.ToInt64() & 0xFFFFFFFF));
+                    return IntPtr.Zero;
+                case WM_AUDIO_NOTIFY:
+                    OnAudioNotify((int)wParam.ToInt64());
                     return IntPtr.Zero;
                 case Native.WM_COPYDATA:
                 {
@@ -895,12 +908,14 @@ namespace LiveWall
             else if (id == TimerStart) { Native.KillTimer(window.Handle, TimerStart); OnStart(); }
             else if (id == TimerBoardDay) { Native.KillTimer(window.Handle, TimerBoardDay); CheckBoardDay(); }
             else if (id == TimerCollection) OnCollectionTimer();
+            else OnMusicTimer(id);
         }
 
         void OnStart()
         {
             if (!host.Refresh()) Log.Warn("Desktop (Progman) not found yet");
             else Log.Info("Desktop: " + host);
+            musicStarted = true;
             if (board != null)
             {
                 // A board was opened (shortcut) while LiveWall was still starting: keep it, just pick the wallpaper behind it.
@@ -919,6 +934,7 @@ namespace LiveWall
         {
             Log.Info("Command: " + cmd);
             if (cmd.StartsWith("collection=")) { UseCollection(cmd.Substring(11)); return; }
+            if (cmd.StartsWith("music-volume=")) { int v; if (int.TryParse(cmd.Substring(13), out v)) SetMusicVolume(v); return; }
             switch (cmd)
             {
                 case "next": Next(); break;
@@ -940,6 +956,11 @@ namespace LiveWall
                 case "debug-occlusion=hidden": debugOcclusion = "hidden"; Evaluate(); break;
                 case "debug-occlusion=auto": debugOcclusion = null; Evaluate(); break;
                 case "debug-new-day": SimulateNewDay(); break;
+                case "music-toggle": ToggleMusicMute(); break;
+                case "music-pause": if (!MusicMuted) ToggleMusicMute(); break;
+                case "music-play": if (MusicMuted) ToggleMusicMute(); break;
+                case "music-next": NextTrack(); break;
+                case "music-settings": ShowMusicSettings(); break;
                 default: ShowSettings(); break;
             }
         }
@@ -953,12 +974,13 @@ namespace LiveWall
                 sb.Append(" | ").Append(s.Bounds.Width).Append('x').Append(s.Bounds.Height).Append(s.Hidden ? " hidden" : " visible").Append(s.Asleep ? " asleep" : "")
                   .Append(" player=").Append(s.Player == null ? "-" : s.Player.Statistics()).Append(s.NextPlayer != null ? " (loading next)" : "");
             sb.Append(" | covering: ").Append(occlusion.Describe());
+            sb.Append(" | ").Append(MusicDebugState());
             return sb.ToString();
         }
 
         void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
-            if (surfaces.Count == 0 || currentVideo == null) return;
+            if ((surfaces.Count == 0 || currentVideo == null) && !MusicWatchesFullscreen) return;
             if ((evt == Native.EVENT_OBJECT_CLOAKED || evt == Native.EVENT_OBJECT_UNCLOAKED) && (idObject != 0 || idChild != 0)) return;
             ScheduleEvaluate(evt == Native.EVENT_SYSTEM_MINIMIZESTART ? 250u : 60u);
         }
@@ -1105,6 +1127,7 @@ namespace LiveWall
             foreach (var id in new[] { TimerPoll, TimerSlideshow, TimerEvaluateSoon, TimerRebuild, TimerPromote, TimerStart, TimerRetry, TimerTrim, TimerBoardDay, TimerCollection })
                 Native.KillTimer(window.Handle, id);
             ShutdownInk();
+            ShutdownMusic();
             power.Dispose();
             if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.Close();
             if (tray != null) { tray.Dispose(); tray = null; }

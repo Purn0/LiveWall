@@ -50,9 +50,29 @@ namespace LiveWall
             for (int m = 0; m < monitors.Count; m++)
                 res.Covered[m] = UncoveredArea(monitors[m]) <= (long)(monitors[m].Width * (long)monitors[m].Height * UncoveredTolerance);
 
+            res.FullscreenApp = DetectFullscreen(monitors, false, out res.FullscreenMonitor);
+            return res;
+        }
+
+        // For the music (cheap: no window enumeration). A maximized window is not a fullscreen app, even when it covers
+        // the whole monitor because the taskbar auto-hides; games, F11 browsers and video players are not "maximized".
+        public static bool FullscreenAppRunning(IList<RECT> monitors, out string windowClass)
+        {
+            int m;
+            windowClass = Native.ClassName(Native.GetForegroundWindow());
+            if (ShellOverlays.Contains(windowClass)) return false;   // Alt+Tab, Task View, Start: not an app
+            return DetectFullscreen(monitors, true, out m);
+        }
+
+        static readonly HashSet<string> ShellOverlays = new HashSet<string>
+            { "XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "ForegroundStaging", "Windows.UI.Core.CoreWindow", "Shell_TrayWnd", "TaskListThumbnailWnd" };
+
+        static bool DetectFullscreen(IList<RECT> monitors, bool ignoreMaximized, out int monitor)
+        {
+            monitor = -1;
             // Fullscreen: the foreground window exactly covers its whole monitor (games, videos, F11 browsers)...
             IntPtr fg = Native.GetForegroundWindow();
-            if (fg != IntPtr.Zero && !IsShellWindow(fg))
+            if (fg != IntPtr.Zero && !IsShellWindow(fg) && !(ignoreMaximized && Native.IsZoomed(fg)))
             {
                 RECT wr;
                 if (Native.GetWindowRect(fg, out wr))
@@ -62,19 +82,16 @@ namespace LiveWall
                         RECT mr = monitors[m];
                         if (wr.Left <= mr.Left && wr.Top <= mr.Top && wr.Right >= mr.Right && wr.Bottom >= mr.Bottom)
                         {
-                            res.FullscreenApp = true;
-                            res.FullscreenMonitor = m;
-                            break;
+                            monitor = m;
+                            return true;
                         }
                     }
                 }
             }
             // ...or Windows itself reports exclusive fullscreen D3D / presentation mode.
             int quns;
-            if (!res.FullscreenApp && Native.SHQueryUserNotificationState(out quns) >= 0 &&
-                (quns == Native.QUNS_RUNNING_D3D_FULL_SCREEN || quns == Native.QUNS_PRESENTATION_MODE))
-                res.FullscreenApp = true;
-            return res;
+            return Native.SHQueryUserNotificationState(out quns) >= 0 &&
+                   (quns == Native.QUNS_RUNNING_D3D_FULL_SCREEN || quns == Native.QUNS_PRESENTATION_MODE);
         }
 
         IntPtr ignore;

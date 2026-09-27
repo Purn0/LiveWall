@@ -10,9 +10,10 @@ namespace LiveWall.Interop
         public static readonly Guid MF_MEDIA_ENGINE_CALLBACK = new Guid("c60381b8-83a4-41f8-a3d0-de05076849a9");
         public static readonly Guid MF_MEDIA_ENGINE_PLAYBACK_HWND = new Guid("d988879b-67c9-4d92-baa7-6eadd446039d");
         public static readonly Guid MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT = new Guid("5066893c-8cf9-42bc-8b8a-472212e52726");
-        public const uint MF_MEDIA_ENGINE_FORCEMUTE = 0x4;
+        public const uint MF_MEDIA_ENGINE_AUDIOONLY = 0x1, MF_MEDIA_ENGINE_FORCEMUTE = 0x4;
+        public const uint AudioCategory_Media = 11, eMultimedia = 1;
 
-        public const uint EVENT_ERROR = 5, EVENT_LOADEDMETADATA = 10, EVENT_ENDED = 19, EVENT_FORMATCHANGE = 1000,
+        public const uint EVENT_ERROR = 5, EVENT_LOADEDMETADATA = 10, EVENT_PLAYING = 13, EVENT_ENDED = 19, EVENT_FORMATCHANGE = 1000,
             EVENT_FIRSTFRAMEREADY = 1009, EVENT_RESOURCELOST = 1012, EVENT_STREAMRENDERINGERROR = 1014;
     }
 

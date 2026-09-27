@@ -176,6 +176,9 @@ namespace LiveWall
             AddRow(root, startupBox, false);
             AddRow(root, trayBox, false);
             AddRow(root, syncBox, false);
+            var musicButton = MakeButton("Music...", (s, e) => app.ShowMusicSettings());
+            musicButton.Margin = new Padding(0, 4, 0, 0);
+            AddRow(root, Line(new Label { Text = "Music per wallpaper (fades out for other apps' sound; costs nothing when silent)", AutoSize = true, Margin = new Padding(0, 10, 8, 3) }, musicButton), false);
             AddRow(root, bottom, false);
         }
 

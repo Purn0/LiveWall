@@ -56,6 +56,49 @@ namespace LiveWall
         }
     }
 
+    // Music: a source spec per wallpaper ("music.<hash>=...", see MusicSpec), a global default, and when to go silent.
+    // Edited only in the Music window and the tray (the Settings window keeps whatever is current).
+    internal sealed class MusicSettings
+    {
+        public string Default = MusicSpec.None;
+        public string Folder = "";                           // "" = the user's Music folder
+        public int Volume = 50;                              // 0-100
+        public bool Muted;                                   // the user paused the music (tray Play/Pause)
+        public bool SilenceForOtherAudio = true;
+        public bool PauseOnFullscreen = true;
+        public bool PauseOnBattery = false;
+        public bool PauseOnEnergySaver = true;
+        public int GraceSeconds = 8;                         // silent this long: the music process ends
+        public int ResumeSeconds = 4;                        // other apps quiet this long: the music comes back
+        public bool AskAi = false;                           // online mood tagging (off by default)
+        public string AiKey = "";                            // DPAPI-protected, base64
+        public string AiModel = "claude-opus-5";
+        public Dictionary<string, string> Overrides = new Dictionary<string, string>();   // wallpaper hash -> spec
+        public Dictionary<string, string> Moods = new Dictionary<string, string>();       // wallpaper hash -> "calm" or "calm ai"
+
+        public MusicSettings Clone()
+        {
+            var c = (MusicSettings)MemberwiseClone();
+            c.Overrides = new Dictionary<string, string>(Overrides);
+            c.Moods = new Dictionary<string, string>(Moods);
+            return c;
+        }
+
+        public string EffectiveFolder
+        {
+            get { return Folder.Length > 0 ? Folder : Environment.GetFolderPath(Environment.SpecialFolder.MyMusic); }
+        }
+
+        public static string KeyFor(string wallpaper) { return AppPaths.ShortHash((wallpaper ?? "").ToLowerInvariant()); }
+
+        // The wallpaper's own choice, or null (= the default).
+        public string OverrideFor(string wallpaper)
+        {
+            string v;
+            return wallpaper != null && Overrides.TryGetValue(KeyFor(wallpaper), out v) ? v : null;
+        }
+    }
+
     // Persisted as simple UTF-8 "key=value" lines in %APPDATA%\LiveWall\settings.ini.
     internal sealed class Settings
     {
@@ -86,6 +129,8 @@ namespace LiveWall
         public string LastBoard = "daily";                   // "daily" or "permanent": what the board shortcut shows
         public string UserId = "";                           // author id stored with each stroke (for shared boards later)
 
+        public MusicSettings Music = new MusicSettings();
+
         // The user's Windows wallpaper before LiveWall first changed it (used by "restore").
         public bool OriginalCaptured;
         public string OriginalWallpaper = "";
@@ -108,6 +153,8 @@ namespace LiveWall
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
                     string k = line.Substring(0, eq).Trim(), v = line.Substring(eq + 1).Trim();
+                    if (k.StartsWith("music.")) { if (v.Length > 0) s.Music.Overrides[k.Substring(6)] = v; continue; }
+                    if (k.StartsWith("mood.")) { if (v.Length > 0) s.Music.Moods[k.Substring(5)] = v; continue; }
                     switch (k)
                     {
                         case "source": if (v.Length > 0) s.Sources.Add(v); break;
@@ -147,6 +194,19 @@ namespace LiveWall
                         case "originalCaptured": s.OriginalCaptured = v == "1"; break;
                         case "originalWallpaper": s.OriginalWallpaper = v; break;
                         case "originalPosition": s.OriginalPosition = ParseInt(v, 4); break;
+                        case "musicDefault": s.Music.Default = v.Length > 0 ? v : MusicSpec.None; break;
+                        case "musicFolder": s.Music.Folder = v; break;
+                        case "musicVolume": s.Music.Volume = Math.Max(0, Math.Min(100, ParseInt(v, 50))); break;
+                        case "musicMuted": s.Music.Muted = v == "1"; break;
+                        case "musicSilenceForOtherAudio": s.Music.SilenceForOtherAudio = v == "1"; break;
+                        case "musicPauseOnFullscreen": s.Music.PauseOnFullscreen = v == "1"; break;
+                        case "musicPauseOnBattery": s.Music.PauseOnBattery = v == "1"; break;
+                        case "musicPauseOnEnergySaver": s.Music.PauseOnEnergySaver = v == "1"; break;
+                        case "musicGraceSeconds": s.Music.GraceSeconds = Math.Max(1, Math.Min(600, ParseInt(v, 8))); break;
+                        case "musicResumeSeconds": s.Music.ResumeSeconds = Math.Max(1, Math.Min(600, ParseInt(v, 4))); break;
+                        case "musicAskAi": s.Music.AskAi = v == "1"; break;
+                        case "musicAiKey": s.Music.AiKey = v; break;
+                        case "musicAiModel": if (v.Length > 0) s.Music.AiModel = v; break;
                     }
                 }
             }
@@ -188,6 +248,22 @@ namespace LiveWall
             sb.AppendLine("originalCaptured=" + B(OriginalCaptured));
             sb.AppendLine("originalWallpaper=" + OriginalWallpaper);
             sb.AppendLine("originalPosition=" + OriginalPosition.ToString(CultureInfo.InvariantCulture));
+            var m = Music;
+            sb.AppendLine("musicDefault=" + m.Default);
+            sb.AppendLine("musicFolder=" + m.Folder);
+            sb.AppendLine("musicVolume=" + m.Volume.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("musicMuted=" + B(m.Muted));
+            sb.AppendLine("musicSilenceForOtherAudio=" + B(m.SilenceForOtherAudio));
+            sb.AppendLine("musicPauseOnFullscreen=" + B(m.PauseOnFullscreen));
+            sb.AppendLine("musicPauseOnBattery=" + B(m.PauseOnBattery));
+            sb.AppendLine("musicPauseOnEnergySaver=" + B(m.PauseOnEnergySaver));
+            sb.AppendLine("musicGraceSeconds=" + m.GraceSeconds.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("musicResumeSeconds=" + m.ResumeSeconds.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("musicAskAi=" + B(m.AskAi));
+            sb.AppendLine("musicAiKey=" + m.AiKey);
+            sb.AppendLine("musicAiModel=" + m.AiModel);
+            foreach (var kv in m.Overrides.OrderBy(x => x.Key, StringComparer.Ordinal)) sb.AppendLine("music." + kv.Key + "=" + kv.Value);
+            foreach (var kv in m.Moods.OrderBy(x => x.Key, StringComparer.Ordinal)) sb.AppendLine("mood." + kv.Key + "=" + kv.Value);
             try
             {
                 string tmp = FilePath + ".tmp";
@@ -204,6 +280,7 @@ namespace LiveWall
             var c = (Settings)MemberwiseClone();
             c.Sources = new List<string>(Sources);
             c.Collections = Collections.Select(x => x.Clone()).ToList();
+            c.Music = Music.Clone();
             return c;
         }
 
