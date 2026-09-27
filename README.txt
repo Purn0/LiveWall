@@ -7,14 +7,26 @@ UNINSTALL: double-click "Uninstall LiveWall.cmd" (also puts your old wallpaper b
 Using it
 - Settings opens after installing. Add videos (MP4, MOV, MKV, WMV...), GIFs or pictures, or whole folders.
   You can also drag files onto the list.
-- "Change wallpaper every" sets the slideshow interval; "Shuffle" randomises the order.
-- The notification-area (tray) icon: left-click = Settings, right-click = Next / Previous / Pause / interval / scaling.
+- "Change wallpaper every" sets the slideshow interval; "Shuffle" randomises the order. The slideshow waits while
+  you draw on the wallpaper (and starts counting again when you are done) and while the desktop is covered.
+- The notification-area (tray) icon: left-click = Settings, right-click = Next / Previous / Pause / collection /
+  interval / scaling.
 - If you hide the tray icon, start LiveWall from the Start menu to open Settings (it never runs twice).
 
+Collections (sets of wallpapers for a theme or mood)
+- Settings > Collections... : New, give it a name, add files, folders or the current wallpaper. The list in
+  Settings itself is "All wallpapers".
+- Ctrl+Alt+W switches to the next collection (a short note at the bottom of the screen says which); the tray
+  icon > Collection menu picks one, and can add the current wallpaper to a collection.
+- Hours: tick "Play by itself every day from ... to ..." (e.g. Day 07:00-19:00, Night 19:00-07:00). During its
+  hours that collection plays; picking another one yourself holds until the next start or end of any hours.
+- A board you are showing stays when the hours change: the new collection plays once you go back to the wallpaper.
+  Nothing switches while you are drawing on the wallpaper either.
+
 Boards and drawing
-- Ctrl+Alt+B: today's board becomes the wallpaper; press again to go back to your wallpaper. Each day starts a
-  fresh board (earlier days are kept: tray icon > Board > Earlier days). There is also a Permanent board that
-  never clears.
+- Ctrl+Alt+B: the board you used last (today's or the Permanent one) becomes the wallpaper; press again to go
+  back to your wallpaper. Each day starts a fresh daily board (earlier days are kept: tray icon > Board > Earlier
+  days). The Permanent board never clears.
 - Ctrl+Alt+D: draw - on the board if one is shown, otherwise on the wallpaper itself (pictures, GIFs and videos).
   Drawings on a wallpaper are kept per wallpaper and shown above it, below the desktop icons. Tray icon >
   Drawings on wallpapers hides or removes them. Esc (or Ctrl+Alt+D again) when done.
@@ -23,12 +35,18 @@ Boards and drawing
   R rectangle, O ellipse; Shift = straight / square / circle; the shapes button also switches filled shapes),
   F fill (click inside a closed area; click a line or shape to recolor it), T text with emoji / kaomoji /
   symbols tabs (or Windows' own panel, Win + .), I eyedropper. Click text again to change it.
+- Select: V (press again, or click the select button, for a lasso to draw around any shape). Drag inside it to
+  move, the square handles to resize (corners keep the proportions; Shift stretches), the round handle to rotate
+  (Shift snaps). The bar under it: cut, copy, delete, rotate left/right, flip. Ctrl+C / Ctrl+X / Ctrl+V,
+  Delete, arrow keys nudge, Ctrl+A selects everything. Paste also takes pictures copied in other apps
+  (e.g. a screenshot). Enter, Esc or clicking outside puts it down; Ctrl+Z before that puts it back.
 - Colors: 1-9, or the rainbow button for any color (color square, RGB, HSV, hex, recent colors). Size: the
   slider, [ and ], or the mouse wheel over the slider. Ctrl+Z / Ctrl+Y undo/redo, Delete clears (undoable),
   B board background, Tab or the Today | Permanent switch changes board, Ctrl+S saves a copy as a picture.
 - Board pictures: every board is also saved as a PNG in Pictures\LiveWall Boards (tray icon > Board > Open board
   pictures), updated whenever it changes.
-- Start menu also gets "LiveWall Board" and "LiveWall Draw": pin them to the taskbar for one-click buttons.
+- Start menu also gets "LiveWall Board" (show / hide the board) and "LiveWall Draw": pin them to the taskbar for
+  one-click buttons.
 - Shortcuts, the look of new boards (whiteboard, blackboard, grid, dots) and more are in Settings.
 - A board costs nothing while shown: it is handed to Windows as a normal picture. Drawings on a video are one
   still, transparent layer the graphics chip blends in. The drawing window uses memory only while it is open.

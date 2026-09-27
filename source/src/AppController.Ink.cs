@@ -21,7 +21,7 @@ namespace LiveWall
     //    above the picture or video and below the icons. Video surfaces are placed directly below it (SurfaceAnchor).
     internal sealed partial class AppController
     {
-        const int HotkeyBoardId = 0x4C01, HotkeyDrawId = 0x4C02;
+        const int HotkeyBoardId = 0x4C01, HotkeyDrawId = 0x4C02, HotkeyCollectionId = 0x4C03;
         static readonly IntPtr TimerBoardDay = new IntPtr(20);
 
         BoardKind? board;              // board shown instead of the wallpaper
@@ -47,6 +47,7 @@ namespace LiveWall
         {
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
+            Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
             CloseEditor();
             if (inkLayer != null) { inkLayer.Dispose(); inkLayer = null; }
         }
@@ -56,10 +57,12 @@ namespace LiveWall
             if (hotkeysSuspended) return;
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
+            Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
             var failed = new List<string>();
             if (!Hotkeys.Register(window.Handle, HotkeyBoardId, settings.HotkeyBoard)) failed.Add(settings.HotkeyBoard);
             if (!Hotkeys.Register(window.Handle, HotkeyDrawId, settings.HotkeyDraw)) failed.Add(settings.HotkeyDraw);
-            if (failed.Count == 0) Log.Info("Shortcuts registered: board " + settings.HotkeyBoard + ", draw " + settings.HotkeyDraw);
+            if (!Hotkeys.Register(window.Handle, HotkeyCollectionId, settings.HotkeyCollection)) failed.Add(settings.HotkeyCollection);
+            if (failed.Count == 0) Log.Info("Shortcuts registered: board " + settings.HotkeyBoard + ", draw " + settings.HotkeyDraw + ", collection " + settings.HotkeyCollection);
             if (failed.Count > 0 && tray != null)
                 tray.ShowBalloon("Shortcut not available",
                     string.Join(" and ", failed) + (failed.Count == 1 ? " is" : " are") + " already used by another app. You can pick another in LiveWall Settings.", true);
@@ -74,6 +77,7 @@ namespace LiveWall
             hotkeysSuspended = true;
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
+            Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
         }
 
         public void ResumeHotkeys()
@@ -87,11 +91,12 @@ namespace LiveWall
         {
             if (id == HotkeyBoardId) ToggleBoard();
             else if (id == HotkeyDrawId) StartDrawing();
+            else if (id == HotkeyCollectionId) NextCollection();
         }
 
         void ApplyInkSettings(Settings old, Settings s)
         {
-            if (old.HotkeyBoard != s.HotkeyBoard || old.HotkeyDraw != s.HotkeyDraw) RegisterHotkeys();
+            if (old.HotkeyBoard != s.HotkeyBoard || old.HotkeyDraw != s.HotkeyDraw || old.HotkeyCollection != s.HotkeyCollection) RegisterHotkeys();
             if (old.ShowWallpaperInk != s.ShowWallpaperInk) RefreshInkOverlays();
             // A new default look applies right away to a board that has nothing on it yet.
             if (old.BoardStyle != s.BoardStyle && board != null && boardDoc != null && !boardDoc.Exists && editor == null)
@@ -122,12 +127,13 @@ namespace LiveWall
 
         string BoardTitle { get { return board == null ? "" : Boards.Title(board.Value, boardDate); } }
 
-        // Hotkey 1: today's board as the wallpaper; again: back to the wallpaper (finishing any drawing first).
+        // Hotkey 1: the board used last (today's or the permanent one) as the wallpaper; again: back to the wallpaper
+        // (finishing any drawing first).
         public void ToggleBoard()
         {
             if (editor != null) CloseEditor();
             if (board != null) ExitBoard();
-            else ShowBoard(BoardKind.Daily, DateTime.Today, false);
+            else ShowBoard(settings.LastBoard == "permanent" ? BoardKind.Permanent : BoardKind.Daily, DateTime.Today, false);
         }
 
         // Hotkey 2: draw on whatever is shown (again: finish).
@@ -154,6 +160,7 @@ namespace LiveWall
             if (!same)
             {
                 boardDoc = OpenBoardDoc(kind, date);
+                settings.LastBoard = kind == BoardKind.Permanent ? "permanent" : "daily";
                 settings.BoardMode = kind == BoardKind.Permanent ? "permanent"
                     : boardFollowsToday ? "daily" : "daily:" + date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
                 settings.Save();
@@ -353,6 +360,9 @@ namespace LiveWall
             string exportName = !isBoard || board == null ? "Drawing " + today
                 : board == BoardKind.Permanent ? "Permanent board " + today : Path.GetFileNameWithoutExtension(Boards.ExportPath(board.Value, boardDate));
             SetEcoQos(false);   // full speed while drawing; Evaluate puts it back once the editor is gone
+            // The slideshow waits while someone draws; it starts counting again when they finish.
+            Native.KillTimer(window.Handle, TimerSlideshow);
+            advanceDeferred = false;
             try
             {
                 editor = new InkEditor(doc, isBoard, isBoard && board == BoardKind.Daily, dailyLabel, mon, settings.UserId, header, seed, picture,
@@ -395,7 +405,12 @@ namespace LiveWall
                     return;
                 }
             }
-            else RefreshInkOverlays();
+            else
+            {
+                RefreshInkOverlays();
+                ScheduleNextAdvance();
+            }
+            if (collectionPending) ApplyCollection(false);
             Evaluate();
             UpdateStatus();
             TrimSoon();

@@ -47,9 +47,11 @@ namespace LiveWall.Ink
             return r;
         }
 
+        // Also releases decoded pictures (InkImage): one call when a drawing is done.
         public static void ClearCache()
         {
             ReleaseD2D();
+            InkImage.ClearCache();
             if (cache == null) return;
             foreach (var r in cache.Values) if (r != null && r.Image != null) r.Image.Dispose();
             cache = null;

@@ -2,11 +2,59 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace LiveWall
 {
     internal enum FitMode { Fill, Fit, Stretch, Center }
+
+    // A named set of wallpapers (files and/or folders), optionally played every day between two times.
+    internal sealed class WallpaperCollection
+    {
+        public string Name = "";
+        public List<string> Sources = new List<string>();
+        public bool Scheduled;
+        public int StartMinute = 7 * 60, EndMinute = 19 * 60;   // minutes after midnight; End < Start wraps past midnight
+
+        public WallpaperCollection Clone()
+        {
+            var c = (WallpaperCollection)MemberwiseClone();
+            c.Sources = new List<string>(Sources);
+            return c;
+        }
+
+        public bool Covers(int minuteOfDay)
+        {
+            if (!Scheduled || StartMinute == EndMinute) return false;
+            return StartMinute < EndMinute ? minuteOfDay >= StartMinute && minuteOfDay < EndMinute
+                                           : minuteOfDay >= StartMinute || minuteOfDay < EndMinute;
+        }
+
+        public string ScheduleText { get { return Clock(StartMinute) + "-" + Clock(EndMinute); } }
+
+        public static string Clock(int minute)
+        {
+            return (minute / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (minute % 60).ToString("00", CultureInfo.InvariantCulture);
+        }
+
+        public static bool TryParseSchedule(string v, out int start, out int end)
+        {
+            start = end = 0;
+            string[] p = v.Split('-');
+            return p.Length == 2 && TryClock(p[0], out start) && TryClock(p[1], out end);
+        }
+
+        static bool TryClock(string s, out int minute)
+        {
+            minute = 0;
+            string[] p = s.Trim().Split(':');
+            int h, m;
+            if (p.Length != 2 || !int.TryParse(p[0], out h) || !int.TryParse(p[1], out m) || h < 0 || h > 23 || m < 0 || m > 59) return false;
+            minute = h * 60 + m;
+            return true;
+        }
+    }
 
     // Persisted as simple UTF-8 "key=value" lines in %APPDATA%\LiveWall\settings.ini.
     internal sealed class Settings
@@ -24,12 +72,18 @@ namespace LiveWall
         public int DeepSleepSeconds = 60;                    // unload the decoder after this long out of sight
         public string LastItem = "";
 
+        // Collections: "" = all wallpapers (Sources above). A scheduled collection takes over during its hours.
+        public List<WallpaperCollection> Collections = new List<WallpaperCollection>();
+        public string ActiveCollection = "";
+        public string HotkeyCollection = "Ctrl+Alt+W";      // next collection
+
         // Boards & drawing
         public string HotkeyBoard = "Ctrl+Alt+B";            // show today's board and draw on it / back to the wallpaper
         public string HotkeyDraw = "Ctrl+Alt+D";             // draw on whatever is shown (board or wallpaper)
         public bool ShowWallpaperInk = true;                 // show drawings made on wallpapers
         public string BoardStyle = "whiteboard";             // background of new boards
         public string BoardMode = "";                        // "", "daily", "daily:yyyy-MM-dd" or "permanent": board shown instead of the wallpaper
+        public string LastBoard = "daily";                   // "daily" or "permanent": what the board shortcut shows
         public string UserId = "";                           // author id stored with each stroke (for shared boards later)
 
         // The user's Windows wallpaper before LiveWall first changed it (used by "restore").
@@ -57,6 +111,22 @@ namespace LiveWall
                     switch (k)
                     {
                         case "source": if (v.Length > 0) s.Sources.Add(v); break;
+                        // A collection's lines follow its "collection=" line.
+                        case "collection": if (v.Length > 0) s.Collections.Add(new WallpaperCollection { Name = v }); break;
+                        case "collectionSource": if (v.Length > 0 && s.Collections.Count > 0) s.Collections[s.Collections.Count - 1].Sources.Add(v); break;
+                        case "collectionSchedule":
+                        {
+                            int a, b;
+                            if (s.Collections.Count > 0 && WallpaperCollection.TryParseSchedule(v, out a, out b))
+                            {
+                                var c = s.Collections[s.Collections.Count - 1];
+                                c.Scheduled = true; c.StartMinute = a; c.EndMinute = b;
+                            }
+                            break;
+                        }
+                        case "activeCollection": s.ActiveCollection = v; break;
+                        case "hotkeyCollection": s.HotkeyCollection = v; break;
+                        case "lastBoard": s.LastBoard = v == "permanent" ? "permanent" : "daily"; break;
                         case "interval": s.IntervalMinutes = Math.Max(0, ParseInt(v, 15)); break;
                         case "shuffle": s.Shuffle = v == "1"; break;
                         case "fit": { FitMode f; if (Enum.TryParse(v, true, out f)) s.Fit = f; break; }
@@ -100,6 +170,15 @@ namespace LiveWall
             sb.AppendLine("showTrayIcon=" + B(ShowTrayIcon));
             sb.AppendLine("deepSleepSeconds=" + DeepSleepSeconds.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("lastItem=" + LastItem);
+            foreach (var c in Collections)
+            {
+                sb.AppendLine("collection=" + c.Name);
+                if (c.Scheduled) sb.AppendLine("collectionSchedule=" + c.ScheduleText);
+                foreach (string src in c.Sources) sb.AppendLine("collectionSource=" + src);
+            }
+            sb.AppendLine("activeCollection=" + ActiveCollection);
+            sb.AppendLine("hotkeyCollection=" + HotkeyCollection);
+            sb.AppendLine("lastBoard=" + LastBoard);
             sb.AppendLine("hotkeyBoard=" + HotkeyBoard);
             sb.AppendLine("hotkeyDraw=" + HotkeyDraw);
             sb.AppendLine("showWallpaperInk=" + B(ShowWallpaperInk));
@@ -124,6 +203,7 @@ namespace LiveWall
         {
             var c = (Settings)MemberwiseClone();
             c.Sources = new List<string>(Sources);
+            c.Collections = Collections.Select(x => x.Clone()).ToList();
             return c;
         }
 

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -21,7 +21,7 @@ namespace LiveWall
         ListView list;
         ComboBox intervalBox, fitBox;
         CheckBox shuffleBox, coveredBox, fullscreenBox, batteryBox, saverBox, startupBox, trayBox, syncBox, inkBox;
-        HotkeyBox boardKeyBox, drawKeyBox;
+        HotkeyBox boardKeyBox, drawKeyBox, collectionKeyBox;
         ComboBox boardStyleBox;
         Label statusLabel;
         Button removeButton, upButton, downButton;
@@ -38,7 +38,7 @@ namespace LiveWall
             Icon = AppIcon.Load(new Size(32, 32));
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
-            ClientSize = new Size(680, 830);      // 96-DPI units; scaled below
+            ClientSize = new Size(680, 880);      // 96-DPI units; scaled below
             MinimumSize = new Size(640, 700);
             BuildUi();
             AutoScaleDimensions = new SizeF(96F, 96F);
@@ -108,7 +108,8 @@ namespace LiveWall
             // Boards & drawing
             boardKeyBox = new HotkeyBox { Margin = new Padding(6, 3, 20, 3) };
             drawKeyBox = new HotkeyBox { Margin = new Padding(6, 3, 3, 3) };
-            foreach (var hk in new[] { boardKeyBox, drawKeyBox })
+            collectionKeyBox = new HotkeyBox { Margin = new Padding(6, 3, 12, 3) };
+            foreach (var hk in new[] { boardKeyBox, drawKeyBox, collectionKeyBox })
             {
                 // While a shortcut box has focus, the current shortcuts must not fire (so they can be typed in).
                 hk.Enter += (s, e) => app.SuspendHotkeys();
@@ -152,6 +153,9 @@ namespace LiveWall
             AddRow(root, Header("Slideshow", false), false);
             AddRow(root, Line(new Label { Text = "Change wallpaper every", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, intervalBox, shuffleBox), false);
             AddRow(root, Line(new Label { Text = "Scaling", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, fitBox), false);
+            var collectionsButton = MakeButton("Collections...", (s, e) => app.ShowCollections());
+            collectionsButton.Margin = new Padding(0, 1, 0, 0);
+            AddRow(root, Line(new Label { Text = "Next collection shortcut", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, collectionKeyBox, collectionsButton), false);
             AddRow(root, Header("Battery & performance", false), false);
             AddRow(root, coveredBox, false);
             AddRow(root, fullscreenBox, false);
@@ -164,7 +168,7 @@ namespace LiveWall
                               new Label { Text = "Draw shortcut", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, drawKeyBox), false);
             AddRow(root, Line(new Label { Text = "New boards look like", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, boardStyleBox, boardsFolder), false);
             AddRow(root, inkBox, false);
-            AddRow(root, Note("The board shortcut shows today's board as the wallpaper (a fresh one every day; earlier days are kept) and " +
+            AddRow(root, Note("The board shortcut shows the board you used last (today's or the permanent one) as the wallpaper (a fresh daily board every day; earlier days are kept) and " +
                               "hides it again. The draw shortcut opens drawing on the board or wallpaper; Esc when done. Boards are also " +
                               "saved as pictures in Pictures\\LiveWall Boards. To change a shortcut, click its box and press the new keys " +
                               "(Backspace = none)."), false);
@@ -239,6 +243,7 @@ namespace LiveWall
             startupBox.Checked = Startup.IsEnabled();
             boardKeyBox.Text = s.HotkeyBoard;
             drawKeyBox.Text = s.HotkeyDraw;
+            collectionKeyBox.Text = s.HotkeyCollection;
             int si = Array.IndexOf(LiveWall.Ink.InkRenderer.Styles, s.BoardStyle);
             boardStyleBox.SelectedIndex = si < 0 ? 0 : si;
             inkBox.Checked = s.ShowWallpaperInk;
@@ -261,6 +266,9 @@ namespace LiveWall
             s.HotkeyBoard = boardKeyBox.Text.Trim();
             s.HotkeyDraw = drawKeyBox.Text.Trim();
             if (s.HotkeyDraw.Length > 0 && string.Equals(s.HotkeyDraw, s.HotkeyBoard, StringComparison.OrdinalIgnoreCase)) s.HotkeyDraw = "";
+            s.HotkeyCollection = collectionKeyBox.Text.Trim();
+            if (s.HotkeyCollection.Length > 0 && (string.Equals(s.HotkeyCollection, s.HotkeyBoard, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(s.HotkeyCollection, s.HotkeyDraw, StringComparison.OrdinalIgnoreCase))) s.HotkeyCollection = "";
             s.BoardStyle = LiveWall.Ink.InkRenderer.Styles[Math.Max(0, boardStyleBox.SelectedIndex)];
             s.ShowWallpaperInk = inkBox.Checked;
             return s;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -116,6 +116,7 @@ namespace LiveWall
             }
 
             Log.Info("LiveWall started (autostart=" + autostart + ", " + power + ")");
+            playingCollection = EffectiveCollection();
             BuildPlaylist();
             // At sign-in, give Explorer a moment; the Windows wallpaper (the live one's first frame) shows meanwhile.
             Native.SetTimer(window.Handle, TimerStart, autostart ? 2500u : 10u, IntPtr.Zero);
@@ -220,6 +221,9 @@ namespace LiveWall
             s.OriginalWallpaper = old.OriginalWallpaper;
             s.OriginalPosition = old.OriginalPosition;
             s.BoardMode = old.BoardMode;
+            s.LastBoard = old.LastBoard;
+            s.Collections = old.Collections;          // edited in the Collections window
+            s.ActiveCollection = old.ActiveCollection;
             s.UserId = old.UserId;
             settings = s;
             settings.Save();
@@ -267,9 +271,10 @@ namespace LiveWall
 
         void BuildPlaylist()
         {
-            items = Playlist.Resolve(settings.Sources);
-            Log.Info("Playlist: " + items.Count + " item(s) from " + settings.Sources.Count + " source(s)");
-            var keys = new HashSet<string>(items.Select(i => i.CacheKey));
+            IList<string> sources = PlaylistSources;
+            items = Playlist.Resolve(sources);
+            Log.Info("Playlist: " + items.Count + " item(s) from " + sources.Count + " source(s)" + (playingCollection.Length > 0 ? " in " + playingCollection : ""));
+            var keys = new HashSet<string>(Playlist.Resolve(AllSources).Select(i => i.CacheKey));
             worker.Enqueue("clean-cache", false, () => { MediaWorker.CleanCache(keys); return true; }, null);
         }
 
@@ -365,6 +370,7 @@ namespace LiveWall
         {
             Native.KillTimer(window.Handle, TimerSlideshow);
             if (board != null) return;
+            if (editor != null) return;   // never under someone drawing: the slideshow restarts when they finish
             // Don't swap videos nobody can see; switch the moment the desktop is visible again.
             if (currentVideo != null && surfaces.Count > 0 && surfaces.All(s => s.Hidden))
             {
@@ -858,13 +864,13 @@ namespace LiveWall
                     {
                         string state = power.ToString();
                         if (state != lastPowerState) { Log.Info("Power: " + state); lastPowerState = state; }
-                        if ((uint)wParam.ToInt64() == Native.PBT_APMRESUMEAUTOMATIC) ScheduleRebuild("resume from sleep", 2000);
+                        if ((uint)wParam.ToInt64() == Native.PBT_APMRESUMEAUTOMATIC) { ScheduleRebuild("resume from sleep", 2000); ApplyCollection(false); }
                         CheckBoardDay();
                         Evaluate();
                     }
                     return new IntPtr(1);
                 case Native.WM_WTSSESSION_CHANGE:
-                    if (power.HandleMessage(msg, wParam, lParam)) { Log.Info("Session: " + power); CheckBoardDay(); Evaluate(); }
+                    if (power.HandleMessage(msg, wParam, lParam)) { Log.Info("Session: " + power); CheckBoardDay(); ApplyCollection(false); Evaluate(); }
                     return null;
                 case Native.WM_QUERYENDSESSION:
                     return new IntPtr(1);
@@ -872,6 +878,7 @@ namespace LiveWall
                     if (wParam != IntPtr.Zero) Shutdown();
                     return IntPtr.Zero;
             }
+            if (msg == 0x001E /*WM_TIMECHANGE*/) { CheckBoardDay(); ApplyCollection(false); }
             if (msg == taskbarCreatedMessage && msg != 0) ScheduleRebuild("Explorer restarted", 1500);
             return null;
         }
@@ -887,6 +894,7 @@ namespace LiveWall
             else if (id == TimerTrim) { Native.KillTimer(window.Handle, TimerTrim); Trim(); }
             else if (id == TimerStart) { Native.KillTimer(window.Handle, TimerStart); OnStart(); }
             else if (id == TimerBoardDay) { Native.KillTimer(window.Handle, TimerBoardDay); CheckBoardDay(); }
+            else if (id == TimerCollection) OnCollectionTimer();
         }
 
         void OnStart()
@@ -900,6 +908,7 @@ namespace LiveWall
                 if (idx >= 0) { BuildOrder(idx); current = items[idx]; }
             }
             else if (!RestoreBoard()) ShowInitial();
+            ScheduleCollectionTimer();
             string cmd = startupCommand;
             startupCommand = null;
             if (cmd != null) HandleCommand(cmd);
@@ -909,6 +918,7 @@ namespace LiveWall
         void HandleCommand(string cmd)
         {
             Log.Info("Command: " + cmd);
+            if (cmd.StartsWith("collection=")) { UseCollection(cmd.Substring(11)); return; }
             switch (cmd)
             {
                 case "next": Next(); break;
@@ -924,6 +934,8 @@ namespace LiveWall
                 case "draw": StartDrawing(); break;
                 case "exit": Exit(); break;
                 case "status": Log.Info("Status: " + DebugState()); break;
+                case "next-collection": NextCollection(); break;
+                case "all-wallpapers": UseCollection(""); break;
                 case "debug-occlusion=visible": debugOcclusion = "visible"; Evaluate(); break;
                 case "debug-occlusion=hidden": debugOcclusion = "hidden"; Evaluate(); break;
                 case "debug-occlusion=auto": debugOcclusion = null; Evaluate(); break;
@@ -1090,7 +1102,7 @@ namespace LiveWall
             Log.Info("Exiting");
             foreach (IntPtr h in hooks) Native.UnhookWinEvent(h);
             hooks.Clear();
-            foreach (var id in new[] { TimerPoll, TimerSlideshow, TimerEvaluateSoon, TimerRebuild, TimerPromote, TimerStart, TimerRetry, TimerTrim, TimerBoardDay })
+            foreach (var id in new[] { TimerPoll, TimerSlideshow, TimerEvaluateSoon, TimerRebuild, TimerPromote, TimerStart, TimerRetry, TimerTrim, TimerBoardDay, TimerCollection })
                 Native.KillTimer(window.Handle, id);
             ShutdownInk();
             power.Dispose();

@@ -11,13 +11,13 @@ using LiveWall.Interop;
 
 namespace LiveWall.Ink
 {
-    internal enum EditorTool { Pen, Highlighter, Eraser, Shape, Fill, Text, Picker }
+    internal enum EditorTool { Pen, Highlighter, Eraser, Shape, Fill, Text, Picker, Select }
 
     // Full-screen drawing surface for one screen: a per-pixel-alpha window (see LayeredBitmap) that shows the board or the
     // wallpaper underneath, plus a floating toolbar. Pen (with pressure and the eraser end), touch and mouse; shapes,
     // paint-bucket fills, text with emoji, an eyedropper and any color. Every change is written to the drawing's file
     // immediately.
-    internal sealed class InkEditor : Form
+    internal sealed partial class InkEditor : Form
     {
         sealed class UndoAction
         {
@@ -57,7 +57,7 @@ namespace LiveWall.Ink
         InkMapping map;
         float unit, dpiScale = 1;
         InkToolbar toolbar;
-        InkToolbar.Item colorItem, saveItem, eraserItem;
+        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem;
         ColorPicker colorPicker;
         TextPanel textPanel;
 
@@ -210,6 +210,7 @@ namespace LiveWall.Ink
                 g.Clear(Color.Transparent);
                 InkRenderer.Prepare(g);
                 InkRenderer.DrawStrokes(g, Rendered, map);
+                ClearFloatingSource(g);
             }
             Compose(ClientArea, present);
         }
@@ -225,8 +226,15 @@ namespace LiveWall.Ink
                 g.Clear(Color.Transparent);
                 InkRenderer.Prepare(g);
                 foreach (var s in Rendered) if (TargetRect(s.Bounds, 4).IntersectsWith(r)) InkRenderer.DrawStroke(g, s, map);
+                ClearFloatingSource(g);
             }
             Compose(r, true);
+        }
+
+        void ClearFloatingSource(Graphics inkGraphics)
+        {
+            if (floating != null && floating.Source != null)
+                InkRenderer.DrawEraseArea(inkGraphics, floating.Source.Select(q => map.ToTarget(q.X, q.Y)).ToArray());
         }
 
         // baseLayer = background + ink in `r`, then onto the screen.
@@ -241,6 +249,7 @@ namespace LiveWall.Ink
             }
             using (var g = Graphics.FromImage(frame.Bitmap)) CopyRect(baseLayer, g, r);
             if (present) frame.Present(Handle, Monitor.Location, r == ClientArea ? (Rectangle?)null : r);
+            if (present && Selecting && r.IntersectsWith(overlay)) DrawSelection();   // keep the selection on top
         }
 
         static void CopyRect(Bitmap src, Graphics dst, Rectangle r)
@@ -292,6 +301,7 @@ namespace LiveWall.Ink
             switch (tool)
             {
                 case EditorTool.Picker: PickColor(client); return;
+                case EditorTool.Select: SelectBegin(client); return;
                 case EditorTool.Fill: FillAt(client); return;
                 case EditorTool.Text: PlaceText(client); return;
                 case EditorTool.Shape:
@@ -325,6 +335,7 @@ namespace LiveWall.Ink
         void Extend(Point client, byte pressure)
         {
             if (!active) return;
+            if (drag != DragKind.None) { SelectExtend(client); return; }
             if (erasing)
             {
                 if (eraseWhole) EraseAt(lastErase, client);
@@ -404,6 +415,7 @@ namespace LiveWall.Ink
         {
             if (!active) return;
             active = false;
+            if (drag != DragKind.None) { SelectEnd(); return; }
             if (erasing)
             {
                 erasing = false;
@@ -617,7 +629,7 @@ namespace LiveWall.Ink
                 {
                     InkStroke hit = null;
                     for (int i = blockers.Count - 1; i >= 0 && hit == null; i--) if (blockers[i].HitTest(c.X, c.Y, 1)) hit = blockers[i];
-                    if (hit != null && (hit.Argb | unchecked((int)0xFF000000)) != color)
+                    if (hit != null && hit.Tool != InkTool.Image && (hit.Argb | unchecked((int)0xFF000000)) != color)
                         AddElement(hit.Recolored(NewId(), author, DateTime.UtcNow.Ticks, color), hit, Rectangle.Empty);
                     return;
                 }
@@ -868,6 +880,7 @@ namespace LiveWall.Ink
 
         public void Undo()
         {
+            if (Selecting) { CancelSelection(); return; }   // undoes the move / resize / rotation
             if (active || Writing || undo.Count == 0) return;
             var a = undo.Pop();
             Document.Erase(a.Added, author);
@@ -879,6 +892,7 @@ namespace LiveWall.Ink
 
         public void Redo()
         {
+            PutDown();
             if (active || Writing || redo.Count == 0) return;
             var a = redo.Pop();
             Document.Restore(a.Added, author);
@@ -892,6 +906,7 @@ namespace LiveWall.Ink
         {
             if (active) End();
             if (Writing) CancelText();
+            CancelSelection();
             var ids = VisibleStrokes.Select(s => s.Id).ToList();
             if (ids.Count == 0) return;
             var a = new UndoAction();
@@ -923,6 +938,7 @@ namespace LiveWall.Ink
         public void SetTool(EditorTool t)
         {
             if (Writing && t != EditorTool.Text) CommitText();
+            if (t != EditorTool.Select) PutDown();
             tool = t;
             if (t != EditorTool.Picker) lastTool = t;
             UpdateCursor();
@@ -943,6 +959,7 @@ namespace LiveWall.Ink
             if (closing) return;
             if (active) End();
             if (Writing) CommitText();
+            PutDown();
             Close();
         }
 
@@ -952,6 +969,7 @@ namespace LiveWall.Ink
         {
             if (active) End();
             if (Writing) CommitText();
+            PutDown();
             try
             {
                 Directory.CreateDirectory(Boards.ExportDir);
@@ -1006,6 +1024,14 @@ namespace LiveWall.Ink
             eraser.HasFlyout = true;
             eraserItem = eraser;
             items.Add(eraser);
+            InkToolbar.Item select = null;
+            select = InkToolbar.Item.Custom((g, r, fg) => DrawSelectIcon(g, r, fg, selectShape == SelectShape.Lasso),
+                "Select part of the drawing (V; again: rectangle or lasso). Then drag to move, handles to resize or rotate; Ctrl+C / Ctrl+X / Ctrl+V, Delete.",
+                () => { SetTool(EditorTool.Select); if (toolbar.FlyoutOpen) toolbar.CloseFlyout(); else toolbar.ShowFlyout(select, BuildSelectFlyout()); },
+                () => tool == EditorTool.Select);
+            select.HasFlyout = true;
+            selectItem = select;
+            items.Add(select);
             InkToolbar.Item shapes = null;
             shapes = InkToolbar.Item.Custom((g, r, fg) => InkToolbar.DrawShapeIcon(g, r, lastShape, ShapeFilled, fg),
                 "Shapes: line (L), arrow (A), rectangle (R), ellipse (O). Hold Shift for straight lines, squares and circles.",
@@ -1045,6 +1071,25 @@ namespace LiveWall.Ink
             items.Add(saveItem);
             items.Add(InkToolbar.Item.Accent("\uE73E", "OK", "Done (Esc)", Finish));
             return items;
+        }
+
+        List<InkToolbar.Item> BuildSelectFlyout()
+        {
+            return new List<InkToolbar.Item>
+            {
+                InkToolbar.Item.Segment(new[] { "Rectangle", "Lasso" }, "Select a rectangle, or draw around any shape (V switches)",
+                    () => selectShape == SelectShape.Lasso ? 1 : 0, i => { selectShape = i == 1 ? SelectShape.Lasso : SelectShape.Rectangle; SetTool(EditorTool.Select); toolbar.CloseFlyout(); }),
+                InkToolbar.Item.Separator(),
+                InkToolbar.Item.Button("\uE77F", "P", "Paste a picture or a copied part of a drawing (Ctrl+V)", Paste, null)
+            };
+        }
+
+        void ToggleSelectShape()
+        {
+            if (active) return;
+            selectShape = selectShape == SelectShape.Lasso ? SelectShape.Rectangle : SelectShape.Lasso;
+            RefreshToolbar();
+            if (toolbar != null && selectItem != null) toolbar.ShowMessage(selectItem, selectShape == SelectShape.Lasso ? "Select: lasso (draw around it)" : "Select: rectangle");
         }
 
         List<InkToolbar.Item> BuildEraserFlyout()
@@ -1100,6 +1145,7 @@ namespace LiveWall.Ink
         {
             base.OnMouseMove(e);
             if (active) Extend(e.Location, 128);
+            else if (tool == EditorTool.Select) { Cursor c = SelectionCursor(e.Location); Cursor = c ?? Cursors.Cross; }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -1162,7 +1208,21 @@ namespace LiveWall.Ink
         {
             switch (keyData)
             {
-                case Keys.Escape: case Keys.Enter: Finish(); return true;
+                case Keys.Escape: case Keys.Enter: if (Selecting) PutDown(); else Finish(); return true;
+                case Keys.Control | Keys.A: SelectAll(); return true;
+                case Keys.Control | Keys.C: CopySelection(); return true;
+                case Keys.Control | Keys.X: CutSelection(); return true;
+                case Keys.Control | Keys.V: Paste(); return true;
+                case Keys.V: if (tool == EditorTool.Select) ToggleSelectShape(); else SetTool(EditorTool.Select); return true;
+                case Keys.Left: case Keys.Right: case Keys.Up: case Keys.Down:
+                case Keys.Shift | Keys.Left: case Keys.Shift | Keys.Right: case Keys.Shift | Keys.Up: case Keys.Shift | Keys.Down:
+                {
+                    if (floating == null) return true;
+                    int step = (keyData & Keys.Shift) != 0 ? 10 : 1;
+                    Keys k0 = keyData & Keys.KeyCode;
+                    Nudge(k0 == Keys.Left ? -step : k0 == Keys.Right ? step : 0, k0 == Keys.Up ? -step : k0 == Keys.Down ? step : 0);
+                    return true;
+                }
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
                 case Keys.Control | Keys.S: SaveImage(); return true;
@@ -1179,7 +1239,7 @@ namespace LiveWall.Ink
                 case Keys.I: UsePicker(); return true;
                 case Keys.OemOpenBrackets: CurrentSize = CurrentSize * 0.8f; return true;
                 case Keys.OemCloseBrackets: CurrentSize = CurrentSize * 1.25f; return true;
-                case Keys.Delete: ClearAll(); return true;
+                case Keys.Delete: if (floating != null) DeleteSelection(); else ClearAll(); return true;
                 case Keys.B: NextBackground(); return true;
                 case Keys.Tab: if (IsBoard) RequestSwitchBoard(); return true;
             }

@@ -75,7 +75,7 @@ namespace LiveWall.Ink
         public static float MaxWidth(InkStroke s)
         {
             if (s.Tool == InkTool.Highlighter || s.IsShape || s.Tool == InkTool.Erase) return s.Width;
-            if (s.Tool == InkTool.Fill || s.Tool == InkTool.Text) return 0;
+            if (s.Tool == InkTool.Fill || s.Tool == InkTool.Text || s.Tool == InkTool.Image) return 0;
             if (!s.HasPressure) return s.Width * PressureFactor(s.Points.Length > 0 ? s.Points[0].P : (byte)128);
             return s.Width * 1.7f;
         }
@@ -109,6 +109,7 @@ namespace LiveWall.Ink
             switch (s.Tool)
             {
                 case InkTool.Erase: DrawErase(g, s, m); return;
+                case InkTool.Image: InkImage.Draw(g, s, m); return;
                 case InkTool.Fill: InkFill.Draw(g, s, m); return;
                 case InkTool.Text: InkText.Draw(g, s, m); return;
                 case InkTool.Pen: case InkTool.Highlighter:
@@ -123,7 +124,21 @@ namespace LiveWall.Ink
         {
             var pts = new PointF[s.Points.Length];
             for (int i = 0; i < pts.Length; i++) pts[i] = m.ToTarget(s.Points[i].X, s.Points[i].Y);
-            DrawErasePath(g, pts, s.Width * m.Scale);
+            if (s.Filled) DrawEraseArea(g, pts);
+            else DrawErasePath(g, pts, s.Width * m.Scale);
+        }
+
+        // Makes the area inside the outline transparent (ink-only layers, like DrawErasePath).
+        public static void DrawEraseArea(Graphics g, PointF[] outline)
+        {
+            if (outline.Length < 3) return;
+            var mode = g.CompositingMode;
+            var smoothing = g.SmoothingMode;
+            g.CompositingMode = CompositingMode.SourceCopy;
+            g.SmoothingMode = SmoothingMode.None;   // exactly the pixels a selection lifts (no half-cleared edge)
+            using (var b = new SolidBrush(Color.Transparent)) g.FillPolygon(b, outline);
+            g.SmoothingMode = smoothing;
+            g.CompositingMode = mode;
         }
 
         public static void DrawErasePath(Graphics g, PointF[] pts, float diameter)

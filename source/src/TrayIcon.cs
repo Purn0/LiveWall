@@ -55,6 +55,7 @@ namespace LiveWall
             menu.MenuItems.Add(new MenuItem("Next wallpaper", (s, e) => app.Next()) { Enabled = several });
             menu.MenuItems.Add(new MenuItem("Previous wallpaper", (s, e) => app.Previous()) { Enabled = several });
             menu.MenuItems.Add(new MenuItem(app.UserPaused ? "Resume" : "Pause", (s, e) => app.TogglePause()) { Enabled = app.HasLiveWallpaper || app.UserPaused });
+            AddCollectionItems();
             menu.MenuItems.Add("-");
             AddBoardItems();
             menu.MenuItems.Add("-");
@@ -79,6 +80,36 @@ namespace LiveWall
             menu.MenuItems.Add(new MenuItem("Settings...", (s, e) => app.ShowSettings()) { DefaultItem = true });
             menu.MenuItems.Add("-");
             menu.MenuItems.Add(new MenuItem("Exit LiveWall", (s, e) => app.Exit()));
+        }
+
+        void AddCollectionItems()
+        {
+            var collections = app.Collections;
+            string playing = app.PlayingCollection;
+            var menuItem = new MenuItem("Collection: " + (playing.Length == 0 ? "All wallpapers" : playing));
+            menuItem.MenuItems.Add(new MenuItem("Next collection" + ShortcutText(app.CollectionHotkey), (s, e) => app.NextCollection())
+                { Enabled = collections.Count > 0 });
+            menuItem.MenuItems.Add("-");
+            menuItem.MenuItems.Add(new MenuItem("All wallpapers", (s, e) => app.UseCollection("")) { RadioCheck = true, Checked = playing.Length == 0 });
+            foreach (var c in collections)
+            {
+                string name = c.Name;
+                menuItem.MenuItems.Add(new MenuItem(name + (c.Scheduled ? "   (" + c.ScheduleText + ")" : ""), (s, e) => app.UseCollection(name))
+                    { RadioCheck = true, Checked = string.Equals(name, playing, StringComparison.OrdinalIgnoreCase), Enabled = c.Sources.Count > 0 });
+            }
+            menuItem.MenuItems.Add("-");
+            if (app.HasWallpaper && collections.Count > 0)
+            {
+                var addTo = new MenuItem("Add this wallpaper to");
+                foreach (var c in collections)
+                {
+                    string name = c.Name;
+                    addTo.MenuItems.Add(new MenuItem(name, (s, e) => app.AddCurrentWallpaperTo(name)));
+                }
+                menuItem.MenuItems.Add(addTo);
+            }
+            menuItem.MenuItems.Add(new MenuItem("Edit collections...", (s, e) => app.ShowCollections()));
+            menu.MenuItems.Add(menuItem);
         }
 
         void AddBoardItems()

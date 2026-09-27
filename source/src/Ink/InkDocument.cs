@@ -10,8 +10,9 @@ namespace LiveWall.Ink
 {
     // Pen and Highlighter are freehand strokes; Line/Arrow/Rectangle/Ellipse are shapes between two points (optionally
     // filled); Fill is a paint-bucket region; Text is text, emoji, kaomoji or symbols at a point; Erase is an eraser path
-    // that clears whatever was drawn before it (the partial eraser).
-    internal enum InkTool { Pen, Highlighter, Line, Arrow, Rectangle, Ellipse, Fill, Text, Erase }
+    // that clears whatever was drawn before it (the partial eraser; filled = an area, e.g. where a selection was lifted
+    // from); Image is a picture (a moved, resized, rotated or pasted part of a drawing) placed on a parallelogram.
+    internal enum InkTool { Pen, Highlighter, Line, Arrow, Rectangle, Ellipse, Fill, Text, Erase, Image }
 
     internal struct InkPoint
     {
@@ -38,18 +39,19 @@ namespace LiveWall.Ink
         public readonly string Text, Font, Effect;
         public readonly bool Bold, Italic;
         public readonly string Base;         // element this one replaces: it takes that one's place in the drawing order
+        public readonly string Data;         // images: PNG, base64
         RectangleF bounds;
         bool boundsKnown;
 
         public InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points)
-            : this(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null) { }
+            : this(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null, null) { }
 
         InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, bool filled,
-                  InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId)
+                  InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId, string data)
         {
             Id = id; Author = author; Ticks = ticks; Tool = tool; Argb = argb; Width = Math.Max(0.5f, width);
             Points = points ?? new InkPoint[0];
-            Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId;
+            Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId; Data = data;
             if (tool == InkTool.Pen || tool == InkTool.Highlighter)
             {
                 byte first = Points.Length > 0 ? Points[0].P : (byte)128;
@@ -59,13 +61,13 @@ namespace LiveWall.Ink
 
         public static InkStroke Shape(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled)
         {
-            return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null);
+            return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null, null);
         }
 
         public static InkStroke FillRegion(string id, string author, long ticks, int argb, InkFill.Mask mask)
         {
             return new InkStroke(id, author, ticks, InkTool.Fill, argb, 1, new[] { new InkPoint(mask.Left, mask.Top, 128) }, false, mask,
-                                 null, null, false, false, null, null);
+                                 null, null, false, false, null, null, null);
         }
 
         // `replaces`: the text this edits (the new one takes its place in the drawing order).
@@ -73,18 +75,37 @@ namespace LiveWall.Ink
                                          bool bold, bool italic, string effect, string replaces = null)
         {
             return new InkStroke(id, author, ticks, InkTool.Text, argb, size, new[] { new InkPoint(at.X, at.Y, 128) }, false, null, text,
-                                 font, bold, italic, effect, replaces);
+                                 font, bold, italic, effect, replaces, null);
         }
 
         // The same element in another color (a new element in the same place: see the class comment).
         public InkStroke Recolored(string id, string author, long ticks, int argb)
         {
-            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id);
+            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data);
         }
 
         InkStroke WithBase(string baseId)
         {
-            return baseId == null ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId);
+            return baseId == null ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data);
+        }
+
+        // Clears the area inside the outline (canvas units).
+        public static InkStroke EraseArea(string id, string author, long ticks, InkPoint[] outline)
+        {
+            return new InkStroke(id, author, ticks, InkTool.Erase, 0, 1, outline, true, null, null, null, false, false, null, null, null);
+        }
+
+        // A picture drawn onto the parallelogram topLeft, topRight, bottomLeft (canvas units).
+        public static InkStroke ImageItem(string id, string author, long ticks, PointF topLeft, PointF topRight, PointF bottomLeft, string pngBase64)
+        {
+            var pts = new[] { new InkPoint(topLeft.X, topLeft.Y, 128), new InkPoint(topRight.X, topRight.Y, 128), new InkPoint(bottomLeft.X, bottomLeft.Y, 128) };
+            return new InkStroke(id, author, ticks, InkTool.Image, 0, 1, pts, false, null, null, null, false, false, null, null, pngBase64);
+        }
+
+        // Images: the fourth corner.
+        public PointF BottomRight
+        {
+            get { return Points.Length < 3 ? PointF.Empty : new PointF(Points[1].X + Points[2].X - Points[0].X, Points[1].Y + Points[2].Y - Points[0].Y); }
         }
 
         public bool IsShape { get { return Tool == InkTool.Line || Tool == InkTool.Arrow || Tool == InkTool.Rectangle || Tool == InkTool.Ellipse; } }
@@ -103,6 +124,13 @@ namespace LiveWall.Ink
         {
             if (Tool == InkTool.Fill) return Mask == null ? RectangleF.Empty : new RectangleF(Mask.Left, Mask.Top, Mask.Width, Mask.Height);
             if (Tool == InkTool.Text) return RectangleF.Inflate(InkText.Measure(this), 2, 2);
+            if (Tool == InkTool.Image && Points.Length >= 3)
+            {
+                PointF d = BottomRight;
+                float x0 = Math.Min(Math.Min(Points[0].X, Points[1].X), Math.Min(Points[2].X, d.X)), x1 = Math.Max(Math.Max(Points[0].X, Points[1].X), Math.Max(Points[2].X, d.X));
+                float y0 = Math.Min(Math.Min(Points[0].Y, Points[1].Y), Math.Min(Points[2].Y, d.Y)), y1 = Math.Max(Math.Max(Points[0].Y, Points[1].Y), Math.Max(Points[2].Y, d.Y));
+                return RectangleF.FromLTRB(x0 - 2, y0 - 2, x1 + 2, y1 + 2);
+            }
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
             foreach (var p in Points)
             {
@@ -124,6 +152,18 @@ namespace LiveWall.Ink
             switch (Tool)
             {
                 case InkTool.Erase: return false;   // not something to erase, recolor or pick
+                case InkTool.Image:
+                {
+                    if (Points.Length < 3) return false;
+                    // In the parallelogram (grown by r): the point's coordinates along its two sides.
+                    float ux = Points[1].X - Points[0].X, uy = Points[1].Y - Points[0].Y, vx = Points[2].X - Points[0].X, vy = Points[2].Y - Points[0].Y;
+                    float det = ux * vy - uy * vx;
+                    if (Math.Abs(det) < 0.001f) return false;
+                    float px = x - Points[0].X, py = y - Points[0].Y;
+                    float along = (px * vy - py * vx) / det, down = (ux * py - uy * px) / det;
+                    float ea = r / Math.Max(1, (float)Math.Sqrt(ux * ux + uy * uy)), eb = r / Math.Max(1, (float)Math.Sqrt(vx * vx + vy * vy));
+                    return along >= -ea && along <= 1 + ea && down >= -eb && down <= 1 + eb;
+                }
                 case InkTool.Text: return true;
                 case InkTool.Fill:
                     if (Mask.Contains(x, y)) return true;
@@ -197,7 +237,7 @@ namespace LiveWall.Ink
             return Dist2(px, py, a.X + vx * t, a.Y + vy * t);
         }
 
-        static readonly string[] ToolNames = { "pen", "hl", "line", "arrow", "rect", "ellipse", "fill", "text", "erase" };
+        static readonly string[] ToolNames = { "pen", "hl", "line", "arrow", "rect", "ellipse", "fill", "text", "erase", "image" };
 
         internal string Serialize()
         {
@@ -222,6 +262,7 @@ namespace LiveWall.Ink
                   .Append(" fx=").Append(Effect ?? InkText.Plain)
                   .Append(" t=").Append(Uri.EscapeDataString(Text ?? ""));
             }
+            if (Tool == InkTool.Image) sb.Append(" img=").Append(Data ?? "");
             if (Base != null) sb.Append(" z=").Append(Base);
             return sb.ToString();
         }
@@ -280,6 +321,14 @@ namespace LiveWall.Ink
                 if (string.IsNullOrEmpty(text)) return null;
                 return TextItem(f[1], f[2], ticks, argb, width, new PointF(pts[0].X, pts[0].Y), text, font, bold, italic, fx);
             }
+            if (tool == InkTool.Image)
+            {
+                string img = null;
+                for (int i = 8; i < f.Length; i++) if (f[i].StartsWith("img=")) img = f[i].Substring(4);
+                if (pts.Count < 3 || string.IsNullOrEmpty(img)) return null;
+                return ImageItem(f[1], f[2], ticks, new PointF(pts[0].X, pts[0].Y), new PointF(pts[1].X, pts[1].Y), new PointF(pts[2].X, pts[2].Y), img);
+            }
+            if (tool == InkTool.Erase && filled) return pts.Count < 3 ? null : EraseArea(f[1], f[2], ticks, pts.ToArray());
             if (tool != InkTool.Pen && tool != InkTool.Highlighter && tool != InkTool.Erase)
                 return pts.Count < 2 ? null : Shape(f[1], f[2], ticks, tool, argb, width, pts[0], pts[1], filled);
             return new InkStroke(f[1], f[2], ticks, tool, argb, width, pts.ToArray());
@@ -296,7 +345,8 @@ namespace LiveWall.Ink
     //   + <id> <author> <ticks> <tool> <argb> <width> <x,y,p;x,y,p;...>    add a stroke
     //       tool: pen, hl; line, arrow, rect, ellipse (two points, "+fill" = filled); fill (<width> unused, points =
     //       the region, see InkFill.Mask); text (width = font size, one point, then font= b= i= fx= t= escaped fields);
-    //       erase (width = eraser diameter; clears everything drawn before it along its path)
+    //       erase (width = eraser diameter; clears everything drawn before it along its path; "+fill" = the area inside);
+    //       image (three corners: top-left, top-right, bottom-left; img=<PNG in base64>)
     //       optional z=<id>: replaces that element and takes its place in the drawing order (recolor, edited text)
     //   - <id> <author> <ticks>         erase a stroke
     //   ~ <id> <author> <ticks>         restore an erased stroke (undo of an erase)
