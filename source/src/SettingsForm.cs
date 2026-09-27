@@ -118,7 +118,7 @@ namespace LiveWall
             boardStyleBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Margin = new Padding(6, 3, 12, 3) };
             foreach (string st in LiveWall.Ink.InkRenderer.Styles) boardStyleBox.Items.Add(LiveWall.Ink.InkRenderer.StyleName(st));
             inkBox = Check("Show my drawings on wallpapers");
-            var boardsFolder = MakeButton("Open boards folder", (s, e) => app.OpenBoardsFolder());
+            var boardsFolder = MakeButton("Open board pictures", (s, e) => app.OpenBoardsFolder());
             boardsFolder.Width = 150;
             boardsFolder.Margin = new Padding(0, 1, 0, 0);
 
@@ -164,8 +164,10 @@ namespace LiveWall
                               new Label { Text = "Draw shortcut", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, drawKeyBox), false);
             AddRow(root, Line(new Label { Text = "New boards look like", AutoSize = true, Margin = new Padding(0, 7, 0, 3) }, boardStyleBox, boardsFolder), false);
             AddRow(root, inkBox, false);
-            AddRow(root, Note("The board shortcut opens today's board (a fresh one every day; earlier days are kept). Press Esc when done " +
-                              "drawing. To change a shortcut, click its box and press the new keys (Backspace = none)."), false);
+            AddRow(root, Note("The board shortcut shows today's board as the wallpaper (a fresh one every day; earlier days are kept) and " +
+                              "hides it again. The draw shortcut opens drawing on the board or wallpaper; Esc when done. Boards are also " +
+                              "saved as pictures in Pictures\\LiveWall Boards. To change a shortcut, click its box and press the new keys " +
+                              "(Backspace = none)."), false);
             AddRow(root, Header("General", false), false);
             AddRow(root, startupBox, false);
             AddRow(root, trayBox, false);

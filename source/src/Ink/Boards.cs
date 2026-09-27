@@ -15,12 +15,25 @@ namespace LiveWall.Ink
     //   %APPDATA%\LiveWall\boards\permanent.lwink            never cleared automatically
     //   %APPDATA%\LiveWall\ink\<hash>.lwink                  drawings on a wallpaper (by its path)
     //   %LOCALAPPDATA%\LiveWall\boards\*.png                 board images handed to Windows (rebuilt any time)
+    //   Pictures\LiveWall Boards\*.png                       copies to open, share or print (see ExportPath)
     internal static class Boards
     {
         public static string Dir { get { return Path.Combine(AppPaths.DataDir, "boards"); } }
         public static string DailyDir { get { return Path.Combine(Dir, "daily"); } }
         public static string PermanentPath { get { return Path.Combine(Dir, "permanent.lwink"); } }
         public static string RenderDir { get { return Path.Combine(AppPaths.LocalDir, "boards"); } }
+
+        // Board pictures for the user: Pictures\LiveWall Boards\Board 2026-09-27.png, ...\Permanent board.png.
+        public static string ExportDir
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "LiveWall Boards"); }
+        }
+
+        public static string ExportPath(BoardKind kind, DateTime date)
+        {
+            return Path.Combine(ExportDir, kind == BoardKind.Permanent ? "Permanent board.png"
+                : "Board " + date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ".png");
+        }
 
         public static string DailyPath(DateTime date)
         {

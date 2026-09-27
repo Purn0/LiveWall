@@ -122,17 +122,12 @@ namespace LiveWall
 
         string BoardTitle { get { return board == null ? "" : Boards.Title(board.Value, boardDate); } }
 
-        // Hotkey 1: show today's board and draw on it; again: finish drawing; again: back to the wallpaper.
+        // Hotkey 1: today's board as the wallpaper; again: back to the wallpaper (finishing any drawing first).
         public void ToggleBoard()
         {
-            if (editor != null)
-            {
-                bool onBoard = editor.IsBoard;
-                CloseEditor();
-                if (onBoard) return;
-            }
+            if (editor != null) CloseEditor();
             if (board != null) ExitBoard();
-            else ShowBoard(BoardKind.Daily, DateTime.Today, true);
+            else ShowBoard(BoardKind.Daily, DateTime.Today, false);
         }
 
         // Hotkey 2: draw on whatever is shown (again: finish).
@@ -244,7 +239,19 @@ namespace LiveWall
             int seed = Boards.Seed(kind, date);
             string name = kind == BoardKind.Daily ? "daily-" + date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "permanent";
             string path = Path.Combine(Boards.RenderDir, name + "-" + DateTime.UtcNow.Ticks.ToString("x", CultureInfo.InvariantCulture) + ".png");
-            worker.EnqueueLatest("board-render", () => InkRenderer.RenderBoardFile(style, strokes, cw, ch, sz.Width, sz.Height, header, seed, path), ok =>
+            // A copy anyone can open, in Pictures\LiveWall Boards (only once the board has something on it).
+            string export = doc.Exists ? Boards.ExportPath(kind, date) : null;
+            worker.EnqueueLatest("board-render", () =>
+            {
+                bool done = InkRenderer.RenderBoardFile(style, strokes, cw, ch, sz.Width, sz.Height, header, seed, path);
+                InkText.ClearCache();
+                if (done && export != null)
+                {
+                    try { Directory.CreateDirectory(Path.GetDirectoryName(export)); File.Copy(path, export, true); }
+                    catch (Exception ex) { Log.Warn("Could not save " + export + ": " + ex.Message); }
+                }
+                return done;
+            }, ok =>
             {
                 if (board == null || boardDoc != doc) return;
                 if (!ok) { TearDownSurfaces(); return; }
@@ -339,10 +346,17 @@ namespace LiveWall
             Rectangle mon = MonitorUnderCursor();
             string header = isBoard && board != null ? Boards.Header(board.Value, boardDate) : null;
             int seed = isBoard && board != null ? Boards.Seed(board.Value, boardDate) : 0;
+            string dailyLabel = board == BoardKind.Daily && boardDate != DateTime.Today
+                ? boardDate.ToString("d MMM", CultureInfo.CurrentCulture) : "Today";
+            // "Save a copy" names: <this> + the time.
+            string today = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            string exportName = !isBoard || board == null ? "Drawing " + today
+                : board == BoardKind.Permanent ? "Permanent board " + today : Path.GetFileNameWithoutExtension(Boards.ExportPath(board.Value, boardDate));
             SetEcoQos(false);   // full speed while drawing; Evaluate puts it back once the editor is gone
             try
             {
-                editor = new InkEditor(doc, isBoard, isBoard && board == BoardKind.Daily, mon, settings.UserId, header, seed, picture, settings.Fit);
+                editor = new InkEditor(doc, isBoard, isBoard && board == BoardKind.Daily, dailyLabel, mon, settings.UserId, header, seed, picture,
+                                       settings.Fit, exportName);
                 editor.Finished += OnEditorFinished;
                 editor.Show();
                 Log.Info("Drawing on " + (isBoard ? BoardTitle.ToLowerInvariant() : "the wallpaper") + " (screen " + mon.Width + "x" + mon.Height + ")");
@@ -468,12 +482,13 @@ namespace LiveWall
             RefreshInkOverlays();
         }
 
+        // The board pictures (Pictures\LiveWall Boards).
         public void OpenBoardsFolder()
         {
             try
             {
-                Directory.CreateDirectory(Boards.Dir);
-                Process.Start("explorer.exe", "\"" + Boards.Dir + "\"");
+                Directory.CreateDirectory(Boards.ExportDir);
+                Process.Start("explorer.exe", "\"" + Boards.ExportDir + "\"");
             }
             catch (Exception ex) { Log.Error("Open boards folder", ex); }
         }

@@ -918,8 +918,8 @@ namespace LiveWall
                 case "toggle-pause": TogglePause(); break;
                 case "add": AddWallpapersDialog(); break;
                 case "board": ToggleBoard(); break;
-                case "daily-board": ShowBoard(BoardKind.Daily, DateTime.Today, true); break;
-                case "permanent-board": ShowBoard(BoardKind.Permanent, DateTime.Today, true); break;
+                case "daily-board": ShowBoard(BoardKind.Daily, DateTime.Today, false); break;
+                case "permanent-board": ShowBoard(BoardKind.Permanent, DateTime.Today, false); break;
                 case "wallpaper": ExitBoard(); break;
                 case "draw": StartDrawing(); break;
                 case "exit": Exit(); break;

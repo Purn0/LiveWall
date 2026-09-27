@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -9,11 +11,12 @@ using LiveWall.Interop;
 
 namespace LiveWall.Ink
 {
-    internal enum EditorTool { Pen, Highlighter, Eraser }
+    internal enum EditorTool { Pen, Highlighter, Eraser, Shape, Fill, Text, Picker }
 
     // Full-screen drawing surface for one screen: a per-pixel-alpha window (see LayeredBitmap) that shows the board or the
-    // wallpaper underneath, plus a small floating toolbar. Pen (with pressure and the eraser end), touch and mouse.
-    // Every finished stroke is written to the drawing's file immediately.
+    // wallpaper underneath, plus a floating toolbar. Pen (with pressure and the eraser end), touch and mouse; shapes,
+    // paint-bucket fills, text with emoji, an eyedropper and any color. Every change is written to the drawing's file
+    // immediately.
     internal sealed class InkEditor : Form
     {
         sealed class UndoAction
@@ -24,11 +27,16 @@ namespace LiveWall.Ink
 
         // Remembered between sessions while LiveWall runs.
         static readonly Dictionary<string, int> lastColor = new Dictionary<string, int>();
+        static readonly List<int> recentColors = new List<int>();
         static EditorTool lastTool = EditorTool.Pen;
-        static int lastSize = 1;
+        static InkTool lastShape = InkTool.Rectangle;
+        static bool shapeFilled, textBold, textItalic;
+        static float penSize = 5, highlighterSize = 20, eraserSize = 22, textSize = 48;   // pens and text: canvas units per 1080 canvas pixels; eraser: screen pixels at 96 DPI
+        static string textFont = "Segoe UI", textEffect = InkText.Plain;
+        static int textTab;
+        static bool eraseWhole;         // eraser removes whole strokes (instead of only what it touches)
 
-        static readonly float[] PenSizes = { 2.5f, 5f, 10f };        // canvas units per 1080 canvas pixels
-        static readonly float[] EraserSizes = { 10f, 22f, 44f };     // screen pixels at 96 DPI
+        const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
 
         public readonly InkDocument Document;
         public readonly bool IsBoard;
@@ -37,23 +45,27 @@ namespace LiveWall.Ink
         public bool SwitchBoardRequested { get; private set; }
         public event EventHandler Finished;
 
-        readonly string author, header;
+        readonly string author, header, dailyLabel, exportName;
         readonly int seed;
         readonly Image picture;          // wallpaper under the drawing (wallpaper mode), may be null
         readonly FitMode fit;
         readonly bool dailyBoard;
         LayeredBitmap frame;             // what is on screen
-        Bitmap baseLayer;                // background + finished strokes
+        Bitmap baseLayer;                // background + finished elements
         Bitmap background;               // background only
+        Bitmap ink;                      // the elements alone (transparent elsewhere)
         InkMapping map;
         float unit, dpiScale = 1;
         InkToolbar toolbar;
+        InkToolbar.Item colorItem, saveItem, eraserItem;
+        ColorPicker colorPicker;
+        TextPanel textPanel;
 
-        EditorTool tool;
-        int colorIndex, sizeIndex;
+        EditorTool tool, toolBeforePicker = EditorTool.Pen;
+        int color;
 
         // Current contact.
-        bool active, erasing, liveHasPressure;
+        bool active, erasing, shaping, liveHasPressure;
         readonly List<InkPoint> live = new List<InkPoint>();
         InkTool liveTool;
         int liveArgb;
@@ -62,6 +74,14 @@ namespace LiveWall.Ink
         byte lastPressure;
         Rectangle liveDirty;
         UndoAction eraseAction;
+        InkPoint shapeStart, shapeEnd;
+        readonly List<InkPoint> erasePath = new List<InkPoint>();   // partial eraser: this drag so far
+
+        // Text being written (the panel is open).
+        PointF textAt;
+        InkStroke textEditing;           // existing text being changed (hidden meanwhile)
+        Rectangle textPreview;
+        string hiddenId;
 
         readonly Stack<UndoAction> undo = new Stack<UndoAction>(), redo = new Stack<UndoAction>();
         List<InkStroke> visibleCache;
@@ -70,12 +90,16 @@ namespace LiveWall.Ink
         IntPtr eraserCursorIcon;
         bool closing;
 
-        public InkEditor(InkDocument doc, bool isBoard, bool dailyBoard, Rectangle monitor, string author, string header, int seed,
-                         Image picture, FitMode fit)
+        // `dailyLabel`: the daily board's name on the board switch ("Today" or a date); `exportName`: default file name
+        // for "Save as picture".
+        public InkEditor(InkDocument doc, bool isBoard, bool dailyBoard, string dailyLabel, Rectangle monitor, string author, string header,
+                         int seed, Image picture, FitMode fit, string exportName)
         {
             Document = doc;
             IsBoard = isBoard;
             this.dailyBoard = dailyBoard;
+            this.dailyLabel = dailyLabel ?? "Today";
+            this.exportName = exportName ?? "Drawing";
             Monitor = monitor;
             this.author = InkDocument.Safe(author);
             this.header = header;
@@ -97,9 +121,8 @@ namespace LiveWall.Ink
             map = InkMapping.Fill(doc.CanvasWidth, doc.CanvasHeight, monitor.Width, monitor.Height);
             unit = Math.Max(0.5f, doc.CanvasHeight / 1080f);
             tool = lastTool;
-            sizeIndex = lastSize;
             int c;
-            colorIndex = lastColor.TryGetValue(ColorKey, out c) ? c : InkRenderer.DefaultColor(doc.Background);
+            color = lastColor.TryGetValue(ColorKey, out c) ? c : InkRenderer.Palette[InkRenderer.DefaultColor(doc.Background)].ToArgb();
         }
 
         string ColorKey { get { return IsBoard ? (InkRenderer.IsDark(Document.Background) ? "dark" : "light") : "wallpaper"; } }
@@ -124,8 +147,9 @@ namespace LiveWall.Ink
             // Pen: no press-and-hold right click and no flicks while drawing.
             InkNative.SetProp(Handle, "MicrosoftTabletPenServiceProperty", new IntPtr(0x1 | 0x8 | 0x10 | 0x10000));
             frame = new LayeredBitmap(Monitor.Width, Monitor.Height);
-            baseLayer = new Bitmap(Monitor.Width, Monitor.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-            background = new Bitmap(Monitor.Width, Monitor.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            baseLayer = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb);
+            background = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb);
+            ink = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb);
             RenderBackground();
             RenderAll(false);
             frame.Present(Handle, Monitor.Location, null);
@@ -134,7 +158,7 @@ namespace LiveWall.Ink
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            toolbar = new InkToolbar(this, BuildToolbar(), dpiScale);
+            toolbar = new InkToolbar(this, Monitor, BuildToolbar(), dpiScale, HeaderBounds);
             toolbar.Show(this);
             UpdateCursor();
             Activate();
@@ -175,22 +199,48 @@ namespace LiveWall.Ink
             }
         }
 
+        // What is drawn: everything visible except text being edited.
+        IEnumerable<InkStroke> Rendered { get { return hiddenId == null ? VisibleStrokes : VisibleStrokes.Where(s => s.Id != hiddenId); } }
+
+        // The elements go onto `ink` (transparent), which is then laid over the background: the eraser clears ink only.
         void RenderAll(bool present)
         {
+            using (var g = Graphics.FromImage(ink))
+            {
+                g.Clear(Color.Transparent);
+                InkRenderer.Prepare(g);
+                InkRenderer.DrawStrokes(g, Rendered, map);
+            }
+            Compose(ClientArea, present);
+        }
+
+        // Redraws one area from the elements (keeps their order: a new fill under an older line stays under it).
+        void RenderRegion(Rectangle r)
+        {
+            r = Rectangle.Intersect(r, ClientArea);
+            if (r.Width <= 0 || r.Height <= 0) return;
+            using (var g = Graphics.FromImage(ink))
+            {
+                g.SetClip(r);
+                g.Clear(Color.Transparent);
+                InkRenderer.Prepare(g);
+                foreach (var s in Rendered) if (TargetRect(s.Bounds, 4).IntersectsWith(r)) InkRenderer.DrawStroke(g, s, map);
+            }
+            Compose(r, true);
+        }
+
+        // baseLayer = background + ink in `r`, then onto the screen.
+        void Compose(Rectangle r, bool present)
+        {
+            r = Rectangle.Intersect(r, ClientArea);
+            if (r.Width <= 0 || r.Height <= 0) return;
             using (var g = Graphics.FromImage(baseLayer))
             {
-                g.CompositingMode = CompositingMode.SourceCopy;
-                g.DrawImage(background, ClientArea, ClientArea, GraphicsUnit.Pixel);
-                g.CompositingMode = CompositingMode.SourceOver;
-                InkRenderer.Prepare(g);
-                InkRenderer.DrawStrokes(g, VisibleStrokes, map);
+                CopyRect(background, g, r);
+                g.DrawImage(ink, r, r, GraphicsUnit.Pixel);
             }
-            using (var g = Graphics.FromImage(frame.Bitmap))
-            {
-                g.CompositingMode = CompositingMode.SourceCopy;
-                g.DrawImage(baseLayer, ClientArea, ClientArea, GraphicsUnit.Pixel);
-            }
-            if (present) frame.Present(Handle, Monitor.Location, null);
+            using (var g = Graphics.FromImage(frame.Bitmap)) CopyRect(baseLayer, g, r);
+            if (present) frame.Present(Handle, Monitor.Location, r == ClientArea ? (Rectangle?)null : r);
         }
 
         static void CopyRect(Bitmap src, Graphics dst, Rectangle r)
@@ -209,26 +259,59 @@ namespace LiveWall.Ink
             return Rectangle.Intersect(r, ClientArea);
         }
 
-        // ------------------------------------------------------------------ strokes
+        void RefreshToolbar() { if (toolbar != null && !toolbar.IsDisposed) toolbar.RefreshAll(); }
+
+        static string NewId() { return Guid.NewGuid().ToString("N"); }
+
+        // ------------------------------------------------------------------ freehand strokes
 
         void Begin(Point client, byte pressure, bool eraserTip)
         {
             if (closing) return;
+            if (toolbar != null) toolbar.CloseFlyout();
             if (active) End();
-            active = true;
             if (eraserTip || tool == EditorTool.Eraser)
             {
+                active = true;
                 erasing = true;
-                eraseAction = new UndoAction();
                 lastErase = client;
-                EraseAt(client, client);
+                if (eraseWhole)
+                {
+                    eraseAction = new UndoAction();
+                    EraseAt(client, client);
+                }
+                else
+                {
+                    PointF c1 = map.ToCanvas(client.X, client.Y);
+                    erasePath.Clear();
+                    erasePath.Add(new InkPoint(c1.X, c1.Y, 128));
+                    EraseLive(client, client);
+                }
                 return;
             }
+            switch (tool)
+            {
+                case EditorTool.Picker: PickColor(client); return;
+                case EditorTool.Fill: FillAt(client); return;
+                case EditorTool.Text: PlaceText(client); return;
+                case EditorTool.Shape:
+                {
+                    PointF c0 = map.ToCanvas(client.X, client.Y);
+                    active = true;
+                    shaping = true;
+                    erasing = false;
+                    shapeStart = shapeEnd = new InkPoint(c0.X, c0.Y, 128);
+                    liveDirty = Rectangle.Empty;
+                    DrawShapePreview();
+                    return;
+                }
+            }
+            active = true;
             erasing = false;
             live.Clear();
             liveTool = tool == EditorTool.Highlighter ? InkTool.Highlighter : InkTool.Pen;
-            liveArgb = InkRenderer.Palette[colorIndex].ToArgb();
-            liveWidth = PenSizes[sizeIndex] * unit * (liveTool == InkTool.Highlighter ? 4f : 1f);
+            liveArgb = color;
+            liveWidth = (liveTool == InkTool.Highlighter ? highlighterSize : penSize) * unit;
             liveHasPressure = false;
             PointF c = map.ToCanvas(client.X, client.Y);
             smooth = c;
@@ -242,7 +325,21 @@ namespace LiveWall.Ink
         void Extend(Point client, byte pressure)
         {
             if (!active) return;
-            if (erasing) { EraseAt(lastErase, client); lastErase = client; return; }
+            if (erasing)
+            {
+                if (eraseWhole) EraseAt(lastErase, client);
+                else
+                {
+                    PointF c1 = map.ToCanvas(client.X, client.Y);
+                    InkPoint prev = erasePath[erasePath.Count - 1];
+                    if (Math.Abs(c1.X - prev.X) + Math.Abs(c1.Y - prev.Y) < 1) return;
+                    erasePath.Add(new InkPoint(c1.X, c1.Y, 128));
+                    EraseLive(lastErase, client);
+                }
+                lastErase = client;
+                return;
+            }
+            if (shaping) { shapeEnd = Constrain(map.ToCanvas(client.X, client.Y)); DrawShapePreview(); return; }
             PointF raw = map.ToCanvas(client.X, client.Y);
             lastRaw = raw;
             lastPressure = pressure;
@@ -310,15 +407,20 @@ namespace LiveWall.Ink
             if (erasing)
             {
                 erasing = false;
-                if (eraseAction != null && eraseAction.Erased.Count > 0) { undo.Push(eraseAction); redo.Clear(); }
-                eraseAction = null;
+                if (eraseWhole)
+                {
+                    if (eraseAction != null && eraseAction.Erased.Count > 0) { undo.Push(eraseAction); redo.Clear(); }
+                    eraseAction = null;
+                }
+                else CommitErasePath();
                 return;
             }
+            if (shaping) { shaping = false; CommitShape(); return; }
             if (live.Count == 0) return;
             InkPoint tail = live[live.Count - 1];
             if (Math.Abs(tail.X - lastRaw.X) + Math.Abs(tail.Y - lastRaw.Y) > 0.5f) live.Add(new InkPoint(lastRaw.X, lastRaw.Y, lastPressure));
 
-            var stroke = new InkStroke(Guid.NewGuid().ToString("N"), author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray());
+            var stroke = new InkStroke(NewId(), author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray());
             live.Clear();
             Document.Add(stroke);
             var action = new UndoAction();
@@ -326,70 +428,470 @@ namespace LiveWall.Ink
             undo.Push(action);
             redo.Clear();
 
-            // Replace the live drawing with the final rendering (identical to how it looks on the wallpaper).
+            // Replace the live drawing with the final rendering (identical to how it looks on the wallpaper). It is the
+            // newest element, so it simply goes on top of the ink.
             Rectangle r = TargetRect(stroke.Bounds, 3);
             if (!liveDirty.IsEmpty) r = Rectangle.Union(r, liveDirty);
-            using (var g = frame.CreateGraphics())
+            using (var g = Graphics.FromImage(ink))
             {
-                CopyRect(baseLayer, g, r);
+                InkRenderer.Prepare(g);
                 g.SetClip(r);
                 InkRenderer.DrawStroke(g, stroke, map);
             }
-            using (var g = Graphics.FromImage(baseLayer)) CopyRect(frame.Bitmap, g, r);
             liveDirty = Rectangle.Empty;
-            frame.Present(Handle, Monitor.Location, r);
-            if (toolbar != null) toolbar.Invalidate();
+            Compose(r, true);
+            RefreshToolbar();
+        }
+
+        // ------------------------------------------------------------------ partial eraser
+
+        float EraseDiameter { get { return eraserSize * dpiScale * 2 / map.Scale; } }   // canvas units, same as the cursor circle
+
+        // Clears the ink under one step of the eraser, right away.
+        void EraseLive(PointF from, PointF to)
+        {
+            float d = EraseDiameter * map.Scale;
+            var r = Rectangle.FromLTRB((int)Math.Min(from.X, to.X), (int)Math.Min(from.Y, to.Y), (int)Math.Max(from.X, to.X) + 1, (int)Math.Max(from.Y, to.Y) + 1);
+            r = Rectangle.Inflate(r, (int)(d / 2) + 3, (int)(d / 2) + 3);
+            using (var g = Graphics.FromImage(ink))
+            {
+                InkRenderer.Prepare(g);
+                InkRenderer.DrawErasePath(g, from == to ? new PointF[] { from } : new PointF[] { from, to }, d);
+            }
+            Compose(r, true);
+        }
+
+        // One eraser drag = one element (and one undo step), if it went over anything.
+        void CommitErasePath()
+        {
+            if (erasePath.Count == 0) return;
+            var s = new InkStroke(NewId(), author, DateTime.UtcNow.Ticks, InkTool.Erase, 0, EraseDiameter, erasePath.ToArray());
+            erasePath.Clear();
+            RectangleF b = s.Bounds;
+            if (!VisibleStrokes.Any(v => v.Tool != InkTool.Erase && v.Bounds.IntersectsWith(b))) return;
+            Document.Add(s);
+            var action = new UndoAction();
+            action.Added.Add(s.Id);
+            undo.Push(action);
+            redo.Clear();
+            RefreshToolbar();
         }
 
         void EraseAt(PointF from, PointF to)
         {
-            float radius = EraserSizes[sizeIndex] * dpiScale / map.Scale;
+            float radius = eraserSize * dpiScale / map.Scale;
             PointF a = map.ToCanvas(from.X, from.Y), b = map.ToCanvas(to.X, to.Y);
             float len = (float)Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
             int steps = Math.Max(1, (int)Math.Ceiling(len / Math.Max(1f, radius * 0.5f)));
             var hit = new List<string>();
+            RectangleF dirty = RectangleF.Empty;
             foreach (var s in VisibleStrokes)
             {
                 for (int i = 0; i <= steps; i++)
                 {
                     float t = i / (float)steps;
-                    if (s.HitTest(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, radius)) { hit.Add(s.Id); break; }
+                    if (s.HitTest(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, radius))
+                    {
+                        hit.Add(s.Id);
+                        dirty = dirty.IsEmpty ? s.Bounds : RectangleF.Union(dirty, s.Bounds);
+                        break;
+                    }
                 }
             }
             if (hit.Count == 0) return;
             var done = Document.Erase(hit, author);
             if (eraseAction != null) eraseAction.Erased.AddRange(done);
-            RenderAll(true);
-            if (toolbar != null) toolbar.Invalidate();
+            RenderRegion(TargetRect(dirty, 4));
+            RefreshToolbar();
+        }
+
+        // Adds a finished element (shape, fill, text) as one undo step, optionally replacing `replaced`.
+        void AddElement(InkStroke s, InkStroke replaced, Rectangle alsoDirty)
+        {
+            var action = new UndoAction();
+            RectangleF dirty = s.Bounds;
+            if (replaced != null)
+            {
+                action.Erased.AddRange(Document.Erase(new[] { replaced.Id }, author));
+                dirty = RectangleF.Union(dirty, replaced.Bounds);
+            }
+            Document.Add(s);
+            action.Added.Add(s.Id);
+            undo.Push(action);
+            redo.Clear();
+            Rectangle r = TargetRect(dirty, 4);
+            if (!alsoDirty.IsEmpty) r = Rectangle.Union(r, alsoDirty);
+            RenderRegion(r);
+            RefreshToolbar();
+        }
+
+        // ------------------------------------------------------------------ shapes
+
+        InkPoint Constrain(PointF c)
+        {
+            if ((ModifierKeys & Keys.Shift) == 0) return new InkPoint(c.X, c.Y, 128);
+            float dx = c.X - shapeStart.X, dy = c.Y - shapeStart.Y;
+            if (lastShape == InkTool.Line || lastShape == InkTool.Arrow)
+            {
+                // Horizontal, vertical or diagonal.
+                double a = Math.Round(Math.Atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+                float len = (float)Math.Sqrt(dx * dx + dy * dy);
+                return new InkPoint(shapeStart.X + (float)Math.Cos(a) * len, shapeStart.Y + (float)Math.Sin(a) * len, 128);
+            }
+            float m = Math.Max(Math.Abs(dx), Math.Abs(dy));   // square / circle
+            return new InkPoint(shapeStart.X + (dx < 0 ? -m : m), shapeStart.Y + (dy < 0 ? -m : m), 128);
+        }
+
+        Rectangle ShapeTargetRect(float width)
+        {
+            var r = RectangleF.FromLTRB(Math.Min(shapeStart.X, shapeEnd.X), Math.Min(shapeStart.Y, shapeEnd.Y),
+                                        Math.Max(shapeStart.X, shapeEnd.X), Math.Max(shapeStart.Y, shapeEnd.Y));
+            float pad = (lastShape == InkTool.Arrow ? InkRenderer.ArrowHead(width) : width / 2) + 2;
+            return TargetRect(RectangleF.Inflate(r, pad, pad), 3);
+        }
+
+        bool ShapeFilled { get { return shapeFilled && (lastShape == InkTool.Rectangle || lastShape == InkTool.Ellipse); } }
+
+        void DrawShapePreview()
+        {
+            float w = penSize * unit;
+            Rectangle now = ShapeTargetRect(w);
+            Rectangle dirty = liveDirty.IsEmpty ? now : Rectangle.Union(liveDirty, now);
+            using (var g = frame.CreateGraphics())
+            {
+                CopyRect(baseLayer, g, dirty);
+                g.SetClip(now);
+                InkRenderer.DrawShape(g, lastShape, color, w, shapeStart, shapeEnd, ShapeFilled, map);
+            }
+            liveDirty = now;
+            frame.Present(Handle, Monitor.Location, dirty);
+        }
+
+        void CommitShape()
+        {
+            Rectangle preview = liveDirty;
+            liveDirty = Rectangle.Empty;
+            if (Math.Abs(shapeEnd.X - shapeStart.X) < 2 && Math.Abs(shapeEnd.Y - shapeStart.Y) < 2)
+            {
+                RenderRegion(preview);   // a click, not a shape
+                return;
+            }
+            AddElement(InkStroke.Shape(NewId(), author, DateTime.UtcNow.Ticks, lastShape, color, penSize * unit, shapeStart, shapeEnd, ShapeFilled),
+                       null, preview);
+        }
+
+        // ------------------------------------------------------------------ fill and eyedropper
+
+        // Fills the area around the point that is enclosed by lines, shapes or text; on a line, shape or text: recolors it.
+        void FillAt(Point client)
+        {
+            PointF c = map.ToCanvas(client.X, client.Y);
+            int w = Document.CanvasWidth, h = Document.CanvasHeight, sx = (int)Math.Floor(c.X), sy = (int)Math.Floor(c.Y);
+            if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+            Cursor = Cursors.WaitCursor;
+            try
+            {
+                // Earlier fills don't block a new one (so an outline drawn on a filled area can still be filled).
+                var blockers = Rendered.Where(s => s.Tool != InkTool.Fill).ToList();
+                var ink = new bool[w * h];
+                using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        InkRenderer.Prepare(g);
+                        InkRenderer.DrawStrokes(g, blockers, new InkMapping { Scale = 1 });
+                    }
+                    var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+                    try
+                    {
+                        var row = new int[w];
+                        for (int y = 0; y < h; y++)
+                        {
+                            Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, w);
+                            for (int x = 0; x < w; x++) ink[y * w + x] = ((row[x] >> 24) & 0xFF) >= 64;
+                        }
+                    }
+                    finally { bmp.UnlockBits(data); }
+                }
+                if (ink[sy * w + sx])
+                {
+                    InkStroke hit = null;
+                    for (int i = blockers.Count - 1; i >= 0 && hit == null; i--) if (blockers[i].HitTest(c.X, c.Y, 1)) hit = blockers[i];
+                    if (hit != null && (hit.Argb | unchecked((int)0xFF000000)) != color)
+                        AddElement(hit.Recolored(NewId(), author, DateTime.UtcNow.Ticks, color), hit, Rectangle.Empty);
+                    return;
+                }
+                var mask = InkFill.Flood(ink, w, h, sx, sy);
+                if (mask != null) AddElement(InkStroke.FillRegion(NewId(), author, DateTime.UtcNow.Ticks, color, mask), null, Rectangle.Empty);
+            }
+            finally { UpdateCursor(); }
+        }
+
+        void PickColor(Point client)
+        {
+            int x = Math.Max(0, Math.Min(Monitor.Width - 1, client.X)), y = Math.Max(0, Math.Min(Monitor.Height - 1, client.Y));
+            Color c = baseLayer.GetPixel(x, y);
+            SetColor(Color.FromArgb(255, c).ToArgb());
+            AddRecent(color);
+            SetTool(toolBeforePicker == EditorTool.Picker ? EditorTool.Pen : toolBeforePicker);
+        }
+
+        static void AddRecent(int argb)
+        {
+            if (InkRenderer.Palette.Any(p => p.ToArgb() == argb)) return;
+            recentColors.Remove(argb);
+            recentColors.Insert(0, argb);
+            if (recentColors.Count > 9) recentColors.RemoveAt(recentColors.Count - 1);
+        }
+
+        // ------------------------------------------------------------------ text
+
+        void PlaceText(Point client)
+        {
+            PointF c = map.ToCanvas(client.X, client.Y);
+            if (textPanel != null && textPanel.Visible)
+            {
+                // Clicking the drawing while writing moves the text there.
+                textAt = c;
+                UpdateTextPreview();
+                textPanel.Activate();
+                textPanel.FocusText();
+                return;
+            }
+            InkStroke hit = Rendered.LastOrDefault(s => s.Tool == InkTool.Text && s.Bounds.Contains(c));
+            textEditing = hit;
+            if (hit != null)
+            {
+                textAt = new PointF(hit.Points[0].X, hit.Points[0].Y);
+                color = hit.Argb | unchecked((int)0xFF000000);
+                textSize = hit.Width / unit;
+                textFont = hit.Font ?? textFont;
+                textBold = hit.Bold;
+                textItalic = hit.Italic;
+                textEffect = hit.Effect ?? InkText.Plain;
+                hiddenId = hit.Id;
+                RenderRegion(TargetRect(hit.Bounds, 4));
+            }
+            else textAt = c;
+
+            if (textPanel == null)
+            {
+                textPanel = new TextPanel(dpiScale, TextMin, TextMax);
+                textPanel.Changed += OnTextPanelChanged;
+                textPanel.Commit += CommitText;
+                textPanel.Cancel += CancelText;
+                textPanel.ColorRequested += () => ShowColorPicker(textPanel.Bounds, false);
+            }
+            textPanel.Reset(hit != null ? hit.Text : "", textFont, textSize, textBold, textItalic, textEffect, color, textTab);
+            PointF at = map.ToTarget(textAt.X, textAt.Y);
+            var near = new Rectangle(Monitor.Left + (int)at.X, Monitor.Top + (int)at.Y, (int)(textSize * unit * map.Scale * 4), (int)(textSize * unit * map.Scale * 1.4f));
+            textPanel.PlaceNear(near, Monitor);
+            textPreview = Rectangle.Empty;
+            textPanel.Show(this);
+            textPanel.Activate();
+            UpdateTextPreview();
+            RefreshToolbar();
+        }
+
+        bool Writing { get { return textPanel != null && textPanel.Visible; } }
+
+        void OnTextPanelChanged()
+        {
+            textFont = textPanel.FontName;
+            textBold = textPanel.IsBold;
+            textItalic = textPanel.IsItalic;
+            textEffect = textPanel.Effect;
+            textSize = textPanel.SizeValue;
+            UpdateTextPreview();
+            RefreshToolbar();
+        }
+
+        // The text as it will look, with a small marker where it starts.
+        void UpdateTextPreview()
+        {
+            if (!Writing) return;
+            PointF p = map.ToTarget(textAt.X, textAt.Y);
+            float px = textSize * unit * map.Scale;
+            InkText.Raster r = string.IsNullOrEmpty(textPanel.Value) ? null
+                : InkText.Render(textPanel.Value, textFont, px, textBold, textItalic, color, textEffect);
+            var marker = new Rectangle((int)p.X - 2, (int)p.Y, 4, (int)Math.Max(8, px * 1.25f));
+            Rectangle now = marker;
+            Point at = Point.Empty;
+            if (r != null)
+            {
+                at = new Point((int)Math.Round(p.X + r.Offset.X), (int)Math.Round(p.Y + r.Offset.Y));
+                now = Rectangle.Union(now, new Rectangle(at, r.Image.Size));
+            }
+            Rectangle dirty = Rectangle.Intersect(textPreview.IsEmpty ? now : Rectangle.Union(textPreview, now), ClientArea);
+            using (var g = frame.CreateGraphics())
+            {
+                CopyRect(baseLayer, g, dirty);
+                if (r != null) g.DrawImageUnscaled(r.Image, at);
+                using (var b = new SolidBrush(Color.FromArgb(200, 26, 115, 232))) g.FillRectangle(b, marker);
+            }
+            if (r != null) r.Image.Dispose();
+            textPreview = now;
+            frame.Present(Handle, Monitor.Location, dirty);
+        }
+
+        void CommitText()
+        {
+            if (!Writing) return;
+            string text = textPanel.Value.Replace("\r\n", "\n").TrimEnd('\n', ' ');
+            if (textPanel.Tab >= 0) textTab = textPanel.Tab;
+            textPanel.Hide();
+            var old = textEditing;
+            Rectangle preview = textPreview;
+            textEditing = null;
+            hiddenId = null;
+            textPreview = Rectangle.Empty;
+            if (text.Trim().Length == 0)
+            {
+                if (old != null)
+                {
+                    // Emptied: remove it.
+                    var action = new UndoAction();
+                    action.Erased.AddRange(Document.Erase(new[] { old.Id }, author));
+                    undo.Push(action);
+                    redo.Clear();
+                    preview = Rectangle.Union(preview, TargetRect(old.Bounds, 4));
+                }
+                RenderRegion(preview);
+            }
+            else AddElement(InkStroke.TextItem(NewId(), author, DateTime.UtcNow.Ticks, color, textSize * unit, textAt, text, textFont, textBold,
+                                               textItalic, textEffect, old != null ? old.Id : null), old, preview);
+            if (!closing) Activate();
+            RefreshToolbar();
+        }
+
+        void CancelText()
+        {
+            if (!Writing) return;
+            if (textPanel.Tab >= 0) textTab = textPanel.Tab;
+            textPanel.Hide();
+            Rectangle r = textPreview;
+            if (textEditing != null) r = Rectangle.Union(r, TargetRect(textEditing.Bounds, 4));
+            textEditing = null;
+            hiddenId = null;
+            textPreview = Rectangle.Empty;
+            RenderRegion(r);
+            Activate();
+        }
+
+        // ------------------------------------------------------------------ colors and sizes
+
+        public void SetColor(int argb) { SetColor(argb, true); }
+
+        void SetColor(int argb, bool syncPicker)
+        {
+            color = argb | unchecked((int)0xFF000000);
+            lastColor[ColorKey] = color;
+            if (tool == EditorTool.Eraser) SetTool(EditorTool.Pen);
+            if (Writing) { textPanel.SetColor(color); UpdateTextPreview(); }
+            if (syncPicker && colorPicker != null && colorPicker.Visible && colorPicker.Current != color) colorPicker.SetColor(color);
+            RefreshToolbar();
+        }
+
+        bool IsPaletteColor(int argb) { return InkRenderer.Palette.Any(p => p.ToArgb() == argb); }
+
+        void ShowColorPicker(Rectangle near, bool below)
+        {
+            if (colorPicker == null)
+            {
+                colorPicker = new ColorPicker(dpiScale, recentColors);
+                colorPicker.ColorChanged += a => SetColor(a, false);
+                colorPicker.EyedropperRequested += () => { colorPicker.Hide(); UsePicker(); };
+                colorPicker.VisibleChanged += (o, e) =>
+                {
+                    if (colorPicker.Visible || closing) return;
+                    AddRecent(color);
+                    if (Writing) textPanel.Activate(); else Activate();
+                };
+            }
+            colorPicker.SetColor(color);
+            if (below) colorPicker.PlaceBelow(near, Monitor); else colorPicker.PlaceNear(near, Monitor);
+            colorPicker.Show(this);
+            colorPicker.Activate();
+        }
+
+        Rectangle ToolbarItemScreenRect(InkToolbar.Item it)
+        {
+            return new Rectangle(toolbar.Left + it.Rect.Left, toolbar.Top + it.Rect.Top, it.Rect.Width, it.Rect.Height);
+        }
+
+        void UsePicker()
+        {
+            if (tool != EditorTool.Picker) toolBeforePicker = tool;
+            SetTool(EditorTool.Picker);
+        }
+
+        float SizeMin { get { return tool == EditorTool.Highlighter ? HighlighterMin : tool == EditorTool.Eraser ? EraserMin : tool == EditorTool.Text ? TextMin : PenMin; } }
+        float SizeMax { get { return tool == EditorTool.Highlighter ? HighlighterMax : tool == EditorTool.Eraser ? EraserMax : tool == EditorTool.Text ? TextMax : PenMax; } }
+
+        float CurrentSize
+        {
+            get { return tool == EditorTool.Highlighter ? highlighterSize : tool == EditorTool.Eraser ? eraserSize : tool == EditorTool.Text ? textSize : penSize; }
+            set
+            {
+                value = Math.Max(SizeMin, Math.Min(SizeMax, value));
+                if (tool == EditorTool.Highlighter) highlighterSize = value;
+                else if (tool == EditorTool.Eraser) eraserSize = value;
+                else if (tool == EditorTool.Text) textSize = value;
+                else penSize = value;
+                if (tool == EditorTool.Eraser) UpdateCursor();
+                if (tool == EditorTool.Text && Writing) { textPanel.SetSize(textSize); UpdateTextPreview(); }
+                RefreshToolbar();
+            }
+        }
+
+        bool SizeApplies { get { return tool != EditorTool.Fill && tool != EditorTool.Picker; } }
+
+        // Slider position 0..1 (logarithmic: fine control of small sizes).
+        float SliderValue { get { return (float)(Math.Log(CurrentSize / SizeMin) / Math.Log(SizeMax / SizeMin)); } }
+        void SetSliderValue(float t) { CurrentSize = (float)(SizeMin * Math.Pow(SizeMax / SizeMin, t)); }
+
+        float SizePreview
+        {
+            get
+            {
+                switch (tool)
+                {
+                    case EditorTool.Eraser: return eraserSize * dpiScale * 2;
+                    case EditorTool.Highlighter: return highlighterSize * unit * map.Scale;
+                    case EditorTool.Text: return textSize * unit * map.Scale * 0.5f;
+                    default: return penSize * unit * map.Scale;
+                }
+            }
         }
 
         // ------------------------------------------------------------------ commands
 
         public void Undo()
         {
-            if (active || undo.Count == 0) return;
+            if (active || Writing || undo.Count == 0) return;
             var a = undo.Pop();
             Document.Erase(a.Added, author);
             Document.Restore(a.Erased, author);
             redo.Push(a);
             RenderAll(true);
-            if (toolbar != null) toolbar.Invalidate();
+            RefreshToolbar();
         }
 
         public void Redo()
         {
-            if (active || redo.Count == 0) return;
+            if (active || Writing || redo.Count == 0) return;
             var a = redo.Pop();
             Document.Restore(a.Added, author);
             Document.Erase(a.Erased, author);
             undo.Push(a);
             RenderAll(true);
-            if (toolbar != null) toolbar.Invalidate();
+            RefreshToolbar();
         }
 
         public void ClearAll()
         {
             if (active) End();
+            if (Writing) CancelText();
             var ids = VisibleStrokes.Select(s => s.Id).ToList();
             if (ids.Count == 0) return;
             var a = new UndoAction();
@@ -397,7 +899,7 @@ namespace LiveWall.Ink
             undo.Push(a);
             redo.Clear();
             RenderAll(true);
-            if (toolbar != null) toolbar.Invalidate();
+            RefreshToolbar();
         }
 
         public void NextBackground()
@@ -411,24 +913,28 @@ namespace LiveWall.Ink
             {
                 // Switch to a pen that shows up on the new background.
                 int c;
-                colorIndex = lastColor.TryGetValue(ColorKey, out c) ? c : InkRenderer.DefaultColor(next);
+                color = lastColor.TryGetValue(ColorKey, out c) ? c : InkRenderer.Palette[InkRenderer.DefaultColor(next)].ToArgb();
             }
             RenderBackground();
             RenderAll(true);
-            if (toolbar != null) toolbar.Invalidate();
+            RefreshToolbar();
         }
 
-        public void SetTool(EditorTool t) { tool = t; lastTool = t; UpdateCursor(); if (toolbar != null) toolbar.Invalidate(); }
-
-        public void SetColor(int i)
+        public void SetTool(EditorTool t)
         {
-            colorIndex = Math.Max(0, Math.Min(InkRenderer.Palette.Length - 1, i));
-            lastColor[ColorKey] = colorIndex;
-            if (tool == EditorTool.Eraser) SetTool(EditorTool.Pen);
-            if (toolbar != null) toolbar.Invalidate();
+            if (Writing && t != EditorTool.Text) CommitText();
+            tool = t;
+            if (t != EditorTool.Picker) lastTool = t;
+            UpdateCursor();
+            RefreshToolbar();
         }
 
-        public void SetSize(int i) { sizeIndex = Math.Max(0, Math.Min(2, i)); lastSize = sizeIndex; UpdateCursor(); if (toolbar != null) toolbar.Invalidate(); }
+        void SetShape(InkTool shape)
+        {
+            lastShape = shape;
+            SetTool(EditorTool.Shape);
+            if (toolbar != null) toolbar.CloseFlyout();
+        }
 
         public void RequestSwitchBoard() { SwitchBoardRequested = true; Finish(); }
 
@@ -436,13 +942,36 @@ namespace LiveWall.Ink
         {
             if (closing) return;
             if (active) End();
+            if (Writing) CommitText();
             Close();
+        }
+
+        // Saves what is on screen (board or wallpaper with the drawing) as a PNG in Pictures\LiveWall Boards. No file
+        // dialog: it would load the shell into this always-running process for good.
+        void SaveImage()
+        {
+            if (active) End();
+            if (Writing) CommitText();
+            try
+            {
+                Directory.CreateDirectory(Boards.ExportDir);
+                string path = Path.Combine(Boards.ExportDir, exportName + " " + DateTime.Now.ToString("HH.mm.ss", System.Globalization.CultureInfo.InvariantCulture) + ".png");
+                baseLayer.Save(path, ImageFormat.Png);
+                Log.Info("Saved drawing as " + path);
+                if (toolbar != null) toolbar.ShowMessage(saveItem, "Saved: Pictures\\LiveWall Boards\\" + Path.GetFileName(path));
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Could not save the picture: " + ex.Message);
+                if (toolbar != null) toolbar.ShowMessage(saveItem, "Could not save the picture: " + ex.Message);
+            }
         }
 
         void UpdateCursor()
         {
+            if (tool == EditorTool.Text) { Cursor = Cursors.IBeam; return; }
             if (tool != EditorTool.Eraser) { Cursor = Cursors.Cross; return; }
-            int d = Math.Max(8, Math.Min(250, (int)(EraserSizes[sizeIndex] * dpiScale * 2)));
+            int d = Math.Max(8, Math.Min(250, (int)(eraserSize * dpiScale * 2)));
             Cursor old = eraserCursor;
             IntPtr oldIcon = eraserCursorIcon;
             using (var bmp = new Bitmap(d + 2, d + 2))
@@ -470,22 +999,35 @@ namespace LiveWall.Ink
             var items = new List<InkToolbar.Item>();
             items.Add(InkToolbar.Item.Button("\uE70F", "P", "Pen (P)", () => SetTool(EditorTool.Pen), () => tool == EditorTool.Pen));
             items.Add(InkToolbar.Item.Button("\uE7E6", "H", "Highlighter (H)", () => SetTool(EditorTool.Highlighter), () => tool == EditorTool.Highlighter));
-            items.Add(InkToolbar.Item.Button("\uE75C", "E", "Eraser (E, or the pen's eraser end / right mouse button)", () => SetTool(EditorTool.Eraser), () => tool == EditorTool.Eraser));
+            InkToolbar.Item eraser = null;
+            eraser = InkToolbar.Item.Button("\uE75C", "E", "Eraser (E, or the pen's eraser end / right mouse button). Click again: erase only what it touches, or whole strokes.",
+                () => { SetTool(EditorTool.Eraser); if (toolbar.FlyoutOpen) toolbar.CloseFlyout(); else toolbar.ShowFlyout(eraser, BuildEraserFlyout()); },
+                () => tool == EditorTool.Eraser);
+            eraser.HasFlyout = true;
+            eraserItem = eraser;
+            items.Add(eraser);
+            InkToolbar.Item shapes = null;
+            shapes = InkToolbar.Item.Custom((g, r, fg) => InkToolbar.DrawShapeIcon(g, r, lastShape, ShapeFilled, fg),
+                "Shapes: line (L), arrow (A), rectangle (R), ellipse (O). Hold Shift for straight lines, squares and circles.",
+                () => { SetTool(EditorTool.Shape); if (toolbar.FlyoutOpen) toolbar.CloseFlyout(); else toolbar.ShowFlyout(shapes, BuildShapeFlyout()); },
+                () => tool == EditorTool.Shape);
+            shapes.HasFlyout = true;
+            items.Add(shapes);
+            items.Add(InkToolbar.Item.Button("\uEB42", "F", "Fill: click inside a closed area to fill it, or on a line or shape to recolor it (F)", () => SetTool(EditorTool.Fill), () => tool == EditorTool.Fill));
+            items.Add(InkToolbar.Item.Button("\uE8D2", "T", "Text, emoji, kaomoji and symbols: click where they go; click text to change it (T)",
+                () => SetTool(EditorTool.Text), () => tool == EditorTool.Text));
+            items.Add(InkToolbar.Item.Button("\uEF3C", "I", "Eyedropper: pick a color from the drawing (I)", UsePicker, () => tool == EditorTool.Picker));
             items.Add(InkToolbar.Item.Separator());
             for (int i = 0; i < InkRenderer.Palette.Length; i++)
             {
-                int idx = i;
-                items.Add(InkToolbar.Item.ColorSwatch(InkRenderer.Palette[i], "Color " + (i + 1) + " (" + (i + 1) + ")", () => SetColor(idx),
-                    () => colorIndex == idx && tool != EditorTool.Eraser));
+                int argb = InkRenderer.Palette[i].ToArgb();
+                items.Add(InkToolbar.Item.ColorSwatch(InkRenderer.Palette[i], "Color " + (i + 1) + " (" + (i + 1) + ")", () => SetColor(argb), () => color == argb));
             }
+            colorItem = InkToolbar.Item.Custom((g, r, fg) => InkToolbar.DrawColorWheelIcon(g, r, Color.FromArgb(color)),
+                "Any color: color square, RGB, HSV, hex, recent colors", () => ShowColorPicker(ToolbarItemScreenRect(colorItem), true), () => !IsPaletteColor(color));
+            items.Add(colorItem);
             items.Add(InkToolbar.Item.Separator());
-            string[] names = { "Thin", "Medium", "Thick" };
-            float[] dots = { 4, 7, 11 };
-            for (int i = 0; i < 3; i++)
-            {
-                int idx = i;
-                items.Add(InkToolbar.Item.Dot(dots[i], names[i] + " ([ and ] change size)", () => SetSize(idx), () => sizeIndex == idx));
-            }
+            items.Add(InkToolbar.Item.Slider("Size ([ and ], or the mouse wheel here)", () => SliderValue, SetSliderValue, () => SizePreview, () => SizeApplies));
             items.Add(InkToolbar.Item.Separator());
             items.Add(InkToolbar.Item.Button("\uE7A7", "\u21B6", "Undo (Ctrl+Z)", Undo, null, () => undo.Count > 0));
             items.Add(InkToolbar.Item.Button("\uE7A6", "\u21B7", "Redo (Ctrl+Y)", Redo, null, () => redo.Count > 0));
@@ -493,17 +1035,57 @@ namespace LiveWall.Ink
             if (IsBoard)
             {
                 items.Add(InkToolbar.Item.Separator());
-                items.Add(InkToolbar.Item.Button("\uE790", "B", "Background: " + InkRenderer.StyleName(Document.Background) + " (click to change)", NextBackground, null));
-                items.Add(InkToolbar.Item.Button(dailyBoard ? "\uE787" : "\uE718", dailyBoard ? "D" : "P",
-                    dailyBoard ? "Today's board. Click for the permanent board (Tab)" : "Permanent board. Click for today's board (Tab)",
-                    RequestSwitchBoard, null));
+                items.Add(InkToolbar.Item.Button("\uE790", "B", "Board background: whiteboard, blackboard, grid, dots (B)", NextBackground, null));
+                items.Add(InkToolbar.Item.Segment(new[] { dailyLabel, "Permanent" }, "Switch between the daily board and the permanent board (Tab)",
+                    () => dailyBoard ? 0 : 1, i => { if (i != (dailyBoard ? 0 : 1)) RequestSwitchBoard(); }));
             }
             items.Add(InkToolbar.Item.Separator());
+            saveItem = InkToolbar.Item.Button("\uE74E", "S", "Save a copy as a picture in Pictures\\LiveWall Boards (Ctrl+S). Boards are also saved there automatically.",
+                SaveImage, null);
+            items.Add(saveItem);
             items.Add(InkToolbar.Item.Accent("\uE73E", "OK", "Done (Esc)", Finish));
             return items;
         }
 
-        public string BackgroundTip { get { return "Background: " + InkRenderer.StyleName(Document.Background) + " (click to change)"; } }
+        List<InkToolbar.Item> BuildEraserFlyout()
+        {
+            return new List<InkToolbar.Item>
+            {
+                InkToolbar.Item.Segment(new[] { "Erase parts", "Whole strokes" },
+                    "Erase only what the eraser touches, or every stroke, shape or text it touches (E switches while erasing)",
+                    () => eraseWhole ? 1 : 0, i => { eraseWhole = i == 1; SetTool(EditorTool.Eraser); toolbar.CloseFlyout(); })
+            };
+        }
+
+        void ToggleEraserMode()
+        {
+            if (active) return;
+            eraseWhole = !eraseWhole;
+            RefreshToolbar();
+            if (toolbar != null && eraserItem != null)
+                toolbar.ShowMessage(eraserItem, eraseWhole ? "Eraser: whole strokes" : "Eraser: only what it touches");
+        }
+
+        List<InkToolbar.Item> BuildShapeFlyout()
+        {
+            var items = new List<InkToolbar.Item>();
+            var shapes = new[] { InkTool.Line, InkTool.Arrow, InkTool.Rectangle, InkTool.Ellipse };
+            var names = new[] { "Line (L)", "Arrow (A)", "Rectangle (R)", "Ellipse (O)" };
+            for (int i = 0; i < shapes.Length; i++)
+            {
+                InkTool sh = shapes[i];
+                items.Add(InkToolbar.Item.Custom((g, r, fg) => InkToolbar.DrawShapeIcon(g, r, sh, shapeFilled, fg), names[i] + ". Hold Shift for straight lines, squares and circles.",
+                    () => SetShape(sh), () => tool == EditorTool.Shape && lastShape == sh));
+            }
+            items.Add(InkToolbar.Item.Separator());
+            items.Add(InkToolbar.Item.Custom((g, r, fg) =>
+            {
+                var rr = RectangleF.Inflate(r, -1, -r.Height * 0.12f);
+                using (var b = new SolidBrush(fg)) g.FillPolygon(b, new[] { new PointF(rr.Left, rr.Bottom), new PointF(rr.Right, rr.Top), new PointF(rr.Right, rr.Bottom) });
+                using (var p = new Pen(fg, Math.Max(1.5f, r.Width / 10))) g.DrawRectangle(p, rr.X, rr.Y, rr.Width, rr.Height);
+            }, "Filled rectangles and ellipses (on / off)", () => { shapeFilled = !shapeFilled; RefreshToolbar(); }, () => shapeFilled));
+            return items;
+        }
 
         // ------------------------------------------------------------------ input
 
@@ -523,7 +1105,7 @@ namespace LiveWall.Ink
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (active) End();
+            if (active) { Extend(e.Location, 128); End(); }   // the release point: its last move can arrive with the release
         }
 
         protected override void OnMouseCaptureChanged(EventArgs e)
@@ -583,24 +1165,34 @@ namespace LiveWall.Ink
                 case Keys.Escape: case Keys.Enter: Finish(); return true;
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
+                case Keys.Control | Keys.S: SaveImage(); return true;
                 case Keys.P: SetTool(EditorTool.Pen); return true;
                 case Keys.H: SetTool(EditorTool.Highlighter); return true;
-                case Keys.E: SetTool(EditorTool.Eraser); return true;
-                case Keys.OemOpenBrackets: SetSize(sizeIndex - 1); return true;
-                case Keys.OemCloseBrackets: SetSize(sizeIndex + 1); return true;
+                case Keys.E: if (tool == EditorTool.Eraser) ToggleEraserMode(); else SetTool(EditorTool.Eraser); return true;
+                case Keys.S: SetTool(EditorTool.Shape); return true;
+                case Keys.L: SetShape(InkTool.Line); return true;
+                case Keys.A: SetShape(InkTool.Arrow); return true;
+                case Keys.R: SetShape(InkTool.Rectangle); return true;
+                case Keys.O: SetShape(InkTool.Ellipse); return true;
+                case Keys.F: SetTool(EditorTool.Fill); return true;
+                case Keys.T: SetTool(EditorTool.Text); return true;
+                case Keys.I: UsePicker(); return true;
+                case Keys.OemOpenBrackets: CurrentSize = CurrentSize * 0.8f; return true;
+                case Keys.OemCloseBrackets: CurrentSize = CurrentSize * 1.25f; return true;
                 case Keys.Delete: ClearAll(); return true;
                 case Keys.B: NextBackground(); return true;
                 case Keys.Tab: if (IsBoard) RequestSwitchBoard(); return true;
             }
             Keys k = keyData & Keys.KeyCode;
-            if ((keyData & Keys.Modifiers) == Keys.None && k >= Keys.D1 && k <= Keys.D9) { SetColor(k - Keys.D1); return true; }
-            if ((keyData & Keys.Modifiers) == Keys.None && k >= Keys.NumPad1 && k <= Keys.NumPad9) { SetColor(k - Keys.NumPad1); return true; }
+            if ((keyData & Keys.Modifiers) == Keys.None && k >= Keys.D1 && k <= Keys.D9) { SetColor(InkRenderer.Palette[k - Keys.D1].ToArgb()); return true; }
+            if ((keyData & Keys.Modifiers) == Keys.None && k >= Keys.NumPad1 && k <= Keys.NumPad9) { SetColor(InkRenderer.Palette[k - Keys.NumPad1].ToArgb()); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (active) End();
+            if (Writing) CommitText();
             closing = true;
             base.OnFormClosing(e);
         }
@@ -609,238 +1201,18 @@ namespace LiveWall.Ink
         {
             base.OnFormClosed(e);
             if (toolbar != null && !toolbar.IsDisposed) toolbar.Close();
+            if (colorPicker != null && !colorPicker.IsDisposed) colorPicker.Close();
+            if (textPanel != null && !textPanel.IsDisposed) textPanel.Close();
             if (frame != null) { frame.Dispose(); frame = null; }
             if (baseLayer != null) { baseLayer.Dispose(); baseLayer = null; }
             if (background != null) { background.Dispose(); background = null; }
+            if (ink != null) { ink.Dispose(); ink = null; }
             if (picture != null) picture.Dispose();
             if (eraserCursor != null) { Cursor = Cursors.Default; eraserCursor.Dispose(); eraserCursor = null; }
             if (eraserCursorIcon != IntPtr.Zero) { DestroyIcon(eraserCursorIcon); eraserCursorIcon = IntPtr.Zero; }
+            InkText.ClearCache();
             var h = Finished;
             if (h != null) h(this, EventArgs.Empty);
-        }
-    }
-
-    // The floating toolbar: owner-drawn, never takes focus away from the drawing (so shortcuts keep working).
-    internal sealed class InkToolbar : Form
-    {
-        internal sealed class Item
-        {
-            public string Glyph, Fallback, Tip;
-            public Action Click;
-            public Func<bool> Selected, Enabled;
-            public Color Swatch = Color.Empty;
-            public float DotSize;
-            public bool IsSeparator, IsAccent;
-            public Rectangle Rect;
-
-            public static Item Button(string glyph, string fallback, string tip, Action click, Func<bool> selected, Func<bool> enabled = null)
-            { return new Item { Glyph = glyph, Fallback = fallback, Tip = tip, Click = click, Selected = selected, Enabled = enabled }; }
-            public static Item ColorSwatch(Color c, string tip, Action click, Func<bool> selected)
-            { return new Item { Swatch = c, Tip = tip, Click = click, Selected = selected }; }
-            public static Item Dot(float size, string tip, Action click, Func<bool> selected)
-            { return new Item { DotSize = size, Tip = tip, Click = click, Selected = selected }; }
-            public static Item Separator() { return new Item { IsSeparator = true }; }
-            public static Item Accent(string glyph, string fallback, string tip, Action click)
-            { return new Item { Glyph = glyph, Fallback = fallback, Tip = tip, Click = click, IsAccent = true }; }
-        }
-
-        readonly InkEditor editor;
-        readonly List<Item> items;
-        readonly float scale;
-        readonly Font glyphFont, textFont;
-        readonly bool haveGlyphs;
-        readonly ToolTip tip = new ToolTip { InitialDelay = 400, ReshowDelay = 100, ShowAlways = true };
-        int hover = -1, grip;
-        string shownTip;
-
-        public InkToolbar(InkEditor editor, List<Item> items, float scale)
-        {
-            this.editor = editor;
-            this.items = items;
-            this.scale = scale;
-            FormBorderStyle = FormBorderStyle.None;
-            StartPosition = FormStartPosition.Manual;
-            ShowInTaskbar = false;
-            TopMost = true;
-            AutoScaleMode = AutoScaleMode.None;
-            BackColor = Color.FromArgb(32, 33, 36);
-            DoubleBuffered = true;
-            haveGlyphs = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons" || f.Name == "Segoe MDL2 Assets");
-            string glyphFamily = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
-            glyphFont = haveGlyphs ? new Font(glyphFamily, 16 * scale, GraphicsUnit.Pixel) : null;
-            textFont = new Font("Segoe UI Semibold", 13 * scale, GraphicsUnit.Pixel);
-
-            int s = (int)(38 * scale), pad = (int)(6 * scale);
-            grip = (int)(16 * scale);
-            int x = pad + grip;
-            foreach (var it in items)
-            {
-                int w = it.IsSeparator ? (int)(11 * scale) : s;
-                it.Rect = new Rectangle(x, pad, w, s);
-                x += w;
-            }
-            ClientSize = new Size(x + pad, s + pad * 2);
-            // Top centre; moved left of the board's date if it would cover it, or below the date if there's no room.
-            int gap = (int)(18 * scale);
-            var bar = new Rectangle(editor.Monitor.Left + (editor.Monitor.Width - ClientSize.Width) / 2, editor.Monitor.Top + gap, ClientSize.Width, ClientSize.Height);
-            Rectangle date = editor.HeaderBounds;
-            if (!date.IsEmpty && bar.IntersectsWith(Rectangle.Inflate(date, gap / 2, gap / 2)))
-            {
-                if (date.Left - gap - bar.Width >= editor.Monitor.Left + gap) bar.X = date.Left - gap - bar.Width;
-                else bar.Y = date.Bottom + gap;
-            }
-            Location = bar.Location;
-        }
-
-        protected override bool ShowWithoutActivation { get { return true; } }
-
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ExStyle |= (int)(Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST);
-                return cp;
-            }
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            int round = 2;   // Windows 11: rounded corners (ignored elsewhere)
-            try { DwmSetWindowAttribute(Handle, 33, ref round, 4); } catch { }
-        }
-
-        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            // Grip dots.
-            using (var b = new SolidBrush(Color.FromArgb(110, 255, 255, 255)))
-            {
-                float d = 3 * scale, cx = (6 * scale + grip) / 2f, cy = ClientSize.Height / 2f;
-                for (int i = -1; i <= 1; i++) { g.FillEllipse(b, cx - d * 1.2f, cy + i * d * 2 - d / 2, d, d); g.FillEllipse(b, cx + d * 0.2f, cy + i * d * 2 - d / 2, d, d); }
-            }
-            for (int i = 0; i < items.Count; i++)
-            {
-                var it = items[i];
-                Rectangle r = it.Rect;
-                if (it.IsSeparator)
-                {
-                    using (var p = new Pen(Color.FromArgb(70, 255, 255, 255), Math.Max(1, scale)))
-                        g.DrawLine(p, r.Left + r.Width / 2f, r.Top + 8 * scale, r.Left + r.Width / 2f, r.Bottom - 8 * scale);
-                    continue;
-                }
-                bool enabled = it.Enabled == null || it.Enabled();
-                bool selected = it.Selected != null && it.Selected();
-                var inner = Rectangle.Inflate(r, -(int)(2 * scale), -(int)(2 * scale));
-                if (it.IsAccent) FillRound(g, inner, Color.FromArgb(i == hover ? 255 : 230, 26, 115, 232));
-                else if (selected) FillRound(g, inner, Color.FromArgb(255, 80, 84, 90));
-                else if (i == hover && enabled) FillRound(g, inner, Color.FromArgb(255, 60, 64, 67));
-
-                Color fg = enabled ? Color.White : Color.FromArgb(90, 255, 255, 255);
-                float cx = r.Left + r.Width / 2f, cy = r.Top + r.Height / 2f;
-                if (it.Swatch != Color.Empty)
-                {
-                    float d = 20 * scale;
-                    using (var b = new SolidBrush(it.Swatch)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
-                    using (var p = new Pen(Color.FromArgb(120, 255, 255, 255), Math.Max(1, scale))) g.DrawEllipse(p, cx - d / 2, cy - d / 2, d, d);
-                }
-                else if (it.DotSize > 0)
-                {
-                    float d = it.DotSize * scale;
-                    using (var b = new SolidBrush(fg)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
-                }
-                else
-                {
-                    Font f = haveGlyphs ? glyphFont : textFont;
-                    string t = haveGlyphs ? it.Glyph : it.Fallback;
-                    using (var b = new SolidBrush(fg))
-                    using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                        g.DrawString(t, f, b, new RectangleF(r.Left, r.Top, r.Width, r.Height), sf);
-                }
-            }
-        }
-
-        void FillRound(Graphics g, Rectangle r, Color c)
-        {
-            float rad = 6 * scale;
-            using (var path = new GraphicsPath())
-            {
-                path.AddArc(r.Left, r.Top, rad * 2, rad * 2, 180, 90);
-                path.AddArc(r.Right - rad * 2, r.Top, rad * 2, rad * 2, 270, 90);
-                path.AddArc(r.Right - rad * 2, r.Bottom - rad * 2, rad * 2, rad * 2, 0, 90);
-                path.AddArc(r.Left, r.Bottom - rad * 2, rad * 2, rad * 2, 90, 90);
-                path.CloseFigure();
-                using (var b = new SolidBrush(c)) g.FillPath(b, path);
-            }
-        }
-
-        int HitTest(Point p)
-        {
-            for (int i = 0; i < items.Count; i++) if (!items[i].IsSeparator && items[i].Rect.Contains(p)) return i;
-            return -1;
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            int h = HitTest(e.Location);
-            if (h != hover) { hover = h; Invalidate(); }
-            string t = h >= 0 ? (items[h].Glyph == "\uE790" ? editor.BackgroundTip : items[h].Tip) : null;
-            if (t != shownTip)
-            {
-                shownTip = t;
-                if (t == null) tip.Hide(this);
-                else tip.Show(t, this, items[h].Rect.Left, items[h].Rect.Bottom + (int)(8 * scale), 4000);
-            }
-            Cursor = e.X < grip + 6 * scale ? Cursors.SizeAll : Cursors.Default;
-        }
-
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            base.OnMouseLeave(e);
-            hover = -1;
-            shownTip = null;
-            tip.Hide(this);
-            Invalidate();
-        }
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left && e.X < grip + 6 * scale)
-            {
-                // Drag the toolbar by its grip.
-                InkNative.ReleaseCapture();
-                Native.SendMessage(Handle, 0xA1 /*WM_NCLBUTTONDOWN*/, new IntPtr(2 /*HTCAPTION*/), IntPtr.Zero);
-            }
-        }
-
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
-            base.OnMouseUp(e);
-            if (e.Button != MouseButtons.Left) return;
-            int h = HitTest(e.Location);
-            if (h < 0) return;
-            var it = items[h];
-            if (it.Enabled != null && !it.Enabled()) return;
-            if (it.Click != null) it.Click();
-            if (!IsDisposed) Invalidate();
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                tip.Dispose();
-                if (glyphFont != null) glyphFont.Dispose();
-                textFont.Dispose();
-            }
-            base.Dispose(disposing);
         }
     }
 }

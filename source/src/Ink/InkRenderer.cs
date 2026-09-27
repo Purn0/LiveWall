@@ -74,7 +74,8 @@ namespace LiveWall.Ink
 
         public static float MaxWidth(InkStroke s)
         {
-            if (s.Tool == InkTool.Highlighter) return s.Width;
+            if (s.Tool == InkTool.Highlighter || s.IsShape || s.Tool == InkTool.Erase) return s.Width;
+            if (s.Tool == InkTool.Fill || s.Tool == InkTool.Text) return 0;
             if (!s.HasPressure) return s.Width * PressureFactor(s.Points.Length > 0 ? s.Points[0].P : (byte)128);
             return s.Width * 1.7f;
         }
@@ -105,7 +106,91 @@ namespace LiveWall.Ink
         public static void DrawStroke(Graphics g, InkStroke s, InkMapping m, bool opaque = false)
         {
             if (s.Points.Length == 0) return;
-            DrawPoints(g, s.Tool, s.Argb, s.Width, s.Points, s.Points.Length, s.HasPressure, m, opaque);
+            switch (s.Tool)
+            {
+                case InkTool.Erase: DrawErase(g, s, m); return;
+                case InkTool.Fill: InkFill.Draw(g, s, m); return;
+                case InkTool.Text: InkText.Draw(g, s, m); return;
+                case InkTool.Pen: case InkTool.Highlighter:
+                    DrawPoints(g, s.Tool, s.Argb, s.Width, s.Points, s.Points.Length, s.HasPressure, m, opaque);
+                    return;
+            }
+            if (s.Points.Length >= 2) DrawShape(g, s.Tool, s.Argb, s.Width, s.Points[0], s.Points[1], s.Filled, m);
+        }
+
+        // The partial eraser: makes its path transparent. Only ever drawn onto an ink-only layer (never onto a background).
+        public static void DrawErase(Graphics g, InkStroke s, InkMapping m)
+        {
+            var pts = new PointF[s.Points.Length];
+            for (int i = 0; i < pts.Length; i++) pts[i] = m.ToTarget(s.Points[i].X, s.Points[i].Y);
+            DrawErasePath(g, pts, s.Width * m.Scale);
+        }
+
+        public static void DrawErasePath(Graphics g, PointF[] pts, float diameter)
+        {
+            if (pts.Length == 0) return;
+            var mode = g.CompositingMode;
+            g.CompositingMode = CompositingMode.SourceCopy;
+            float d = Math.Max(1, diameter);
+            if (pts.Length == 1)
+                using (var b = new SolidBrush(Color.Transparent)) g.FillEllipse(b, pts[0].X - d / 2, pts[0].Y - d / 2, d, d);
+            else
+                using (var pen = new Pen(Color.Transparent, d) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                    g.DrawLines(pen, pts);
+            g.CompositingMode = mode;
+        }
+
+        // Line, arrow, rectangle or ellipse from `a` to `b` (canvas units).
+        public static void DrawShape(Graphics g, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled, InkMapping m)
+        {
+            Color color = Color.FromArgb(255, Color.FromArgb(argb));
+            float w = Math.Max(0.8f, width * m.Scale);
+            PointF pa = m.ToTarget(a.X, a.Y), pb = m.ToTarget(b.X, b.Y);
+            var r = RectangleF.FromLTRB(Math.Min(pa.X, pb.X), Math.Min(pa.Y, pb.Y), Math.Max(pa.X, pb.X), Math.Max(pa.Y, pb.Y));
+            using (var pen = new Pen(color, w))
+            using (var brush = new SolidBrush(color))
+            {
+                pen.StartCap = pen.EndCap = LineCap.Round;
+                switch (tool)
+                {
+                    case InkTool.Line: g.DrawLine(pen, pa, pb); break;
+                    case InkTool.Arrow:
+                    {
+                        PointF[] head = ArrowHeadPoints(a, b, width);
+                        for (int i = 0; i < head.Length; i++) head[i] = m.ToTarget(head[i].X, head[i].Y);
+                        // The shaft stops inside the head so its round cap doesn't poke out of the tip.
+                        float len = (float)Math.Sqrt((pb.X - pa.X) * (pb.X - pa.X) + (pb.Y - pa.Y) * (pb.Y - pa.Y));
+                        float cut = len <= 0.01f ? 0 : Math.Min(1, ArrowHead(width) * m.Scale * 0.6f / len);
+                        g.DrawLine(pen, pa, new PointF(pb.X - (pb.X - pa.X) * cut, pb.Y - (pb.Y - pa.Y) * cut));
+                        pen.LineJoin = LineJoin.Round;
+                        g.FillPolygon(brush, head);
+                        g.DrawPolygon(pen, head);
+                        break;
+                    }
+                    case InkTool.Rectangle:
+                        pen.LineJoin = LineJoin.Miter;
+                        if (filled) g.FillRectangle(brush, r);
+                        g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+                        break;
+                    case InkTool.Ellipse:
+                        if (filled) g.FillEllipse(brush, r);
+                        g.DrawEllipse(pen, r);
+                        break;
+                }
+            }
+        }
+
+        public static float ArrowHead(float width) { return Math.Max(width * 3.2f, 10f); }
+
+        // Tip, then the two back corners (canvas units).
+        public static PointF[] ArrowHeadPoints(InkPoint a, InkPoint b, float width)
+        {
+            float dx = b.X - a.X, dy = b.Y - a.Y;
+            float len = (float)Math.Sqrt(dx * dx + dy * dy);
+            if (len < 0.01f) { dx = 1; dy = 0; len = 1; }
+            float ux = dx / len, uy = dy / len, head = Math.Min(ArrowHead(width), Math.Max(len, 1) * 0.9f + width), half = head * 0.55f;
+            float bx = b.X - ux * head, by = b.Y - uy * head;
+            return new[] { new PointF(b.X, b.Y), new PointF(bx - uy * half, by + ux * half), new PointF(bx + uy * half, by - ux * half) };
         }
 
         public static void DrawPoints(Graphics g, InkTool tool, int argb, float width, InkPoint[] pts, int count, bool pressure, InkMapping m,
@@ -282,7 +367,16 @@ namespace LiveWall.Ink
                         Prepare(g);
                         var m = InkMapping.Fill(canvasW, canvasH, w, h);
                         DrawBackground(g, style, new Rectangle(0, 0, w, h), m, header, seed);
-                        DrawStrokes(g, strokes, m);
+                        // The ink on its own layer, so the eraser clears ink and not the board.
+                        using (var ink = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+                        {
+                            using (var gi = Graphics.FromImage(ink))
+                            {
+                                Prepare(gi);
+                                DrawStrokes(gi, strokes, m);
+                            }
+                            g.DrawImageUnscaled(ink, 0, 0);
+                        }
                     }
                     string tmp = path + ".part";
                     bmp.Save(tmp, ImageFormat.Png);

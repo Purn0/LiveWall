@@ -102,7 +102,11 @@ namespace LiveWall.Ink
                             after = h;
                         }
                 }
-                finally { if (picture != null) picture.Dispose(); }
+                finally
+                {
+                    if (picture != null) picture.Dispose();
+                    InkText.ClearCache();
+                }
                 ui.Post(_ =>
                 {
                     if (gen != generation) return;
@@ -215,8 +219,9 @@ namespace LiveWall.Ink
             int w = s.Bounds.Width, h = s.Bounds.Height;
             if (w <= 0 || h <= 0 || !Native.IsWindow(parent)) return made;
             var m = InkMapping.Fill(canvasW, canvasH, w, h);
+            // Eraser paths go with both (they clear whatever was drawn before them) but don't make a window bigger.
             var pens = strokes.Where(st => st.Tool != InkTool.Highlighter).ToList();
-            var highlights = strokes.Where(st => st.Tool == InkTool.Highlighter).ToList();
+            var highlights = strokes.Where(st => st.Tool == InkTool.Highlighter || st.Tool == InkTool.Erase).ToList();
             IntPtr after = insertAfter;
             Rectangle crop = Crop(pens, m, w, h);
             if (!crop.IsEmpty)
@@ -239,6 +244,7 @@ namespace LiveWall.Ink
             RectangleF area = RectangleF.Empty;
             foreach (var st in strokes)
             {
+                if (st.Tool == InkTool.Erase) continue;
                 RectangleF r = m.ToTarget(st.Bounds);
                 area = area.IsEmpty ? r : RectangleF.Union(area, r);
             }
@@ -271,21 +277,23 @@ namespace LiveWall.Ink
         // Pens: solid ink, and its anti-aliased edges blended with the wallpaper underneath (hard edges without one).
         static int[] RenderPens(List<InkStroke> strokes, InkMapping m, Rectangle crop, Bitmap picture, FitMode fit, int screenW, int screenH)
         {
-            int[] ink = RenderStrokes(strokes, m, crop, false);
-            int[] blended = null;
-            if (picture != null)
+            int[] ink, blended = null;
+            using (Bitmap layer = RenderStrokes(strokes, m, crop, false))
             {
-                using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
-                {
-                    using (var g = Graphics.FromImage(bmp))
+                ink = Pixels(layer);
+                if (picture != null)
+                    using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
                     {
-                        InkRenderer.Prepare(g);
-                        g.TranslateTransform(-crop.Left, -crop.Top);
-                        InkRenderer.DrawPicture(g, picture, new Rectangle(0, 0, screenW, screenH), fit);
-                        InkRenderer.DrawStrokes(g, strokes, m);
+                        using (var g = Graphics.FromImage(bmp))
+                        {
+                            InkRenderer.Prepare(g);
+                            g.TranslateTransform(-crop.Left, -crop.Top);
+                            InkRenderer.DrawPicture(g, picture, new Rectangle(0, 0, screenW, screenH), fit);
+                            g.ResetTransform();
+                            g.DrawImageUnscaled(layer, 0, 0);
+                        }
+                        blended = Pixels(bmp);
                     }
-                    blended = Pixels(bmp);
-                }
             }
             for (int i = 0; i < ink.Length; i++)
             {
@@ -299,24 +307,24 @@ namespace LiveWall.Ink
         // Highlighters: opaque here; the window's constant alpha makes them translucent.
         static int[] RenderHighlights(List<InkStroke> strokes, InkMapping m, Rectangle crop)
         {
-            int[] px = RenderStrokes(strokes, m, crop, true);
+            int[] px;
+            using (Bitmap layer = RenderStrokes(strokes, m, crop, true)) px = Pixels(layer);
             for (int i = 0; i < px.Length; i++)
                 px[i] = ((px[i] >> 24) & 0xFF) < 128 ? KeyArgb : NotKey(Unpremultiply(px[i]));
             return px;
         }
 
-        static int[] RenderStrokes(List<InkStroke> strokes, InkMapping m, Rectangle crop, bool opaque)
+        // The elements on a transparent layer (erasers clear what is under them).
+        static Bitmap RenderStrokes(List<InkStroke> strokes, InkMapping m, Rectangle crop, bool opaque)
         {
-            using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
+            var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(bmp))
             {
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    InkRenderer.Prepare(g);
-                    g.TranslateTransform(-crop.Left, -crop.Top);
-                    foreach (var st in strokes) InkRenderer.DrawStroke(g, st, m, opaque);
-                }
-                return Pixels(bmp);
+                InkRenderer.Prepare(g);
+                g.TranslateTransform(-crop.Left, -crop.Top);
+                foreach (var st in strokes) InkRenderer.DrawStroke(g, st, m, opaque);
             }
+            return bmp;
         }
 
         static int[] Pixels(Bitmap bmp)

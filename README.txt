@@ -12,19 +12,27 @@ Using it
 - If you hide the tray icon, start LiveWall from the Start menu to open Settings (it never runs twice).
 
 Boards and drawing
-- Ctrl+Alt+B: today's board replaces the wallpaper and you can write or draw on it right away. Each day starts a
+- Ctrl+Alt+B: today's board becomes the wallpaper; press again to go back to your wallpaper. Each day starts a
   fresh board (earlier days are kept: tray icon > Board > Earlier days). There is also a Permanent board that
-  never clears. Press Ctrl+Alt+B again when done; once more to go back to your wallpaper.
-- Ctrl+Alt+D: draw on the wallpaper itself (pictures, GIFs and videos). Drawings are kept per wallpaper and shown
-  above it, below the desktop icons. Tray icon > Drawings on wallpapers hides or removes them.
-- While drawing: P pen, H highlighter, E eraser (or the pen's eraser end / right mouse button), 1-9 colors,
-  [ ] size, Ctrl+Z / Ctrl+Y undo/redo, Delete clears (undoable), B board background, Tab daily/permanent board,
-  Esc done. Pen pressure and touch are supported.
+  never clears.
+- Ctrl+Alt+D: draw - on the board if one is shown, otherwise on the wallpaper itself (pictures, GIFs and videos).
+  Drawings on a wallpaper are kept per wallpaper and shown above it, below the desktop icons. Tray icon >
+  Drawings on wallpapers hides or removes them. Esc (or Ctrl+Alt+D again) when done.
+- Tools: P pen, H highlighter, E eraser (or the pen's eraser end / right mouse button; it erases only what it
+  touches - press E again, or click the eraser button, for "whole strokes"), shapes (L line, A arrow,
+  R rectangle, O ellipse; Shift = straight / square / circle; the shapes button also switches filled shapes),
+  F fill (click inside a closed area; click a line or shape to recolor it), T text with emoji / kaomoji /
+  symbols tabs (or Windows' own panel, Win + .), I eyedropper. Click text again to change it.
+- Colors: 1-9, or the rainbow button for any color (color square, RGB, HSV, hex, recent colors). Size: the
+  slider, [ and ], or the mouse wheel over the slider. Ctrl+Z / Ctrl+Y undo/redo, Delete clears (undoable),
+  B board background, Tab or the Today | Permanent switch changes board, Ctrl+S saves a copy as a picture.
+- Board pictures: every board is also saved as a PNG in Pictures\LiveWall Boards (tray icon > Board > Open board
+  pictures), updated whenever it changes.
 - Start menu also gets "LiveWall Board" and "LiveWall Draw": pin them to the taskbar for one-click buttons.
 - Shortcuts, the look of new boards (whiteboard, blackboard, grid, dots) and more are in Settings.
 - A board costs nothing while shown: it is handed to Windows as a normal picture. Drawings on a video are one
   still, transparent layer the graphics chip blends in. The drawing window uses memory only while it is open.
-- Boards and drawings: %APPDATA%\LiveWall\boards and %APPDATA%\LiveWall\ink (plain text, one line per stroke).
+- Drawing data: %APPDATA%\LiveWall\boards and %APPDATA%\LiveWall\ink (plain text, one line per element).
 
 What it does to save battery
 - Pictures are handed to Windows as a normal wallpaper: no cost at all while shown.

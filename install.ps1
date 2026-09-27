@@ -35,7 +35,7 @@ $link.Save()
 
 # Extra Start menu entries (right-click > Pin to taskbar / Pin to Start to get one-click buttons).
 foreach ($s in @(
-    @{ Name = 'LiveWall Board'; Args = '--daily-board'; Desc = "Show today's board and draw on it" },
+    @{ Name = 'LiveWall Board'; Args = '--board';       Desc = "Show or hide today's board" },
     @{ Name = 'LiveWall Draw';  Args = '--draw';        Desc = 'Draw on the wallpaper (or the board)' })) {
     $l = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) ($s.Name + '.lnk')))
     $l.TargetPath = $exe

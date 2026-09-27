@@ -8,7 +8,10 @@ using System.Text;
 
 namespace LiveWall.Ink
 {
-    internal enum InkTool { Pen, Highlighter }
+    // Pen and Highlighter are freehand strokes; Line/Arrow/Rectangle/Ellipse are shapes between two points (optionally
+    // filled); Fill is a paint-bucket region; Text is text, emoji, kaomoji or symbols at a point; Erase is an eraser path
+    // that clears whatever was drawn before it (the partial eraser).
+    internal enum InkTool { Pen, Highlighter, Line, Arrow, Rectangle, Ellipse, Fill, Text, Erase }
 
     internal struct InkPoint
     {
@@ -17,8 +20,9 @@ namespace LiveWall.Ink
         public InkPoint(float x, float y, byte p) { X = x; Y = y; P = p; }
     }
 
-    // One finished stroke. Strokes never change after they are created; erasing is a separate operation. That makes the
-    // file an append-only log and lets several people edit the same board later without conflicts (see InkDocument).
+    // One finished element (stroke, shape, fill or text). Elements never change after they are created; erasing is a
+    // separate operation and a change (recolor, edited text) is an erase plus a new element. That makes the file an
+    // append-only log and lets several people edit the same board later without conflicts (see InkDocument).
     internal sealed class InkStroke
     {
         public readonly string Id;
@@ -26,39 +30,161 @@ namespace LiveWall.Ink
         public readonly long Ticks;          // UTC
         public readonly InkTool Tool;
         public readonly int Argb;
-        public readonly float Width;         // canvas units at pressure 128
-        public readonly InkPoint[] Points;
-        public readonly RectangleF Bounds;   // canvas units, including the stroke's thickness
+        public readonly float Width;         // canvas units at pressure 128; the font size for text
+        public readonly InkPoint[] Points;   // freehand: the path; shapes: two corners; text: its top-left
         public readonly bool HasPressure;
+        public readonly bool Filled;         // shapes
+        public readonly InkFill.Mask Mask;   // fills
+        public readonly string Text, Font, Effect;
+        public readonly bool Bold, Italic;
+        public readonly string Base;         // element this one replaces: it takes that one's place in the drawing order
+        RectangleF bounds;
+        bool boundsKnown;
 
         public InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points)
+            : this(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null) { }
+
+        InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, bool filled,
+                  InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId)
         {
             Id = id; Author = author; Ticks = ticks; Tool = tool; Argb = argb; Width = Math.Max(0.5f, width);
             Points = points ?? new InkPoint[0];
+            Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId;
+            if (tool == InkTool.Pen || tool == InkTool.Highlighter)
+            {
+                byte first = Points.Length > 0 ? Points[0].P : (byte)128;
+                foreach (var p in Points) if (p.P != first) HasPressure = true;
+            }
+        }
+
+        public static InkStroke Shape(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled)
+        {
+            return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null);
+        }
+
+        public static InkStroke FillRegion(string id, string author, long ticks, int argb, InkFill.Mask mask)
+        {
+            return new InkStroke(id, author, ticks, InkTool.Fill, argb, 1, new[] { new InkPoint(mask.Left, mask.Top, 128) }, false, mask,
+                                 null, null, false, false, null, null);
+        }
+
+        // `replaces`: the text this edits (the new one takes its place in the drawing order).
+        public static InkStroke TextItem(string id, string author, long ticks, int argb, float size, PointF at, string text, string font,
+                                         bool bold, bool italic, string effect, string replaces = null)
+        {
+            return new InkStroke(id, author, ticks, InkTool.Text, argb, size, new[] { new InkPoint(at.X, at.Y, 128) }, false, null, text,
+                                 font, bold, italic, effect, replaces);
+        }
+
+        // The same element in another color (a new element in the same place: see the class comment).
+        public InkStroke Recolored(string id, string author, long ticks, int argb)
+        {
+            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id);
+        }
+
+        InkStroke WithBase(string baseId)
+        {
+            return baseId == null ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId);
+        }
+
+        public bool IsShape { get { return Tool == InkTool.Line || Tool == InkTool.Arrow || Tool == InkTool.Rectangle || Tool == InkTool.Ellipse; } }
+
+        // Canvas units, including the stroke's thickness (text: its ink, measured once).
+        public RectangleF Bounds
+        {
+            get
+            {
+                if (!boundsKnown) { bounds = ComputeBounds(); boundsKnown = true; }
+                return bounds;
+            }
+        }
+
+        RectangleF ComputeBounds()
+        {
+            if (Tool == InkTool.Fill) return Mask == null ? RectangleF.Empty : new RectangleF(Mask.Left, Mask.Top, Mask.Width, Mask.Height);
+            if (Tool == InkTool.Text) return RectangleF.Inflate(InkText.Measure(this), 2, 2);
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
-            byte first = Points.Length > 0 ? Points[0].P : (byte)128;
             foreach (var p in Points)
             {
                 if (p.X < minX) minX = p.X; if (p.Y < minY) minY = p.Y;
                 if (p.X > maxX) maxX = p.X; if (p.Y > maxY) maxY = p.Y;
-                if (p.P != first) HasPressure = true;
             }
             if (Points.Length == 0) { minX = minY = maxX = maxY = 0; }
-            float pad = InkRenderer.MaxWidth(this) / 2 + 1;
-            Bounds = RectangleF.FromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+            float pad = (Tool == InkTool.Arrow ? InkRenderer.ArrowHead(Width) : InkRenderer.MaxWidth(this) / 2) + 1;
+            return RectangleF.FromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
         }
 
-        // True when a circle of radius r (canvas units) at (x, y) touches the stroke.
+        // True when a circle of radius r (canvas units) at (x, y) touches the element.
         public bool HitTest(float x, float y, float r)
         {
-            if (x < Bounds.Left - r || x > Bounds.Right + r || y < Bounds.Top - r || y > Bounds.Bottom + r) return false;
+            RectangleF b = Bounds;
+            if (x < b.Left - r || x > b.Right + r || y < b.Top - r || y > b.Bottom + r) return false;
             float reach = r + InkRenderer.MaxWidth(this) / 2;
             float reach2 = reach * reach;
+            switch (Tool)
+            {
+                case InkTool.Erase: return false;   // not something to erase, recolor or pick
+                case InkTool.Text: return true;
+                case InkTool.Fill:
+                    if (Mask.Contains(x, y)) return true;
+                    for (int i = 0; i < 8; i++)
+                        if (Mask.Contains(x + r * (float)Math.Cos(i * Math.PI / 4), y + r * (float)Math.Sin(i * Math.PI / 4))) return true;
+                    return false;
+                case InkTool.Rectangle:
+                {
+                    RectangleF rc = ShapeRect;
+                    if (Filled) return RectangleF.Inflate(rc, reach, reach).Contains(x, y);
+                    var c = new[] { new InkPoint(rc.Left, rc.Top, 0), new InkPoint(rc.Right, rc.Top, 0), new InkPoint(rc.Right, rc.Bottom, 0),
+                                    new InkPoint(rc.Left, rc.Bottom, 0), new InkPoint(rc.Left, rc.Top, 0) };
+                    for (int i = 1; i < c.Length; i++) if (SegmentDist2(x, y, c[i - 1], c[i]) <= reach2) return true;
+                    return false;
+                }
+                case InkTool.Ellipse:
+                {
+                    RectangleF rc = ShapeRect;
+                    float rx = Math.Max(0.5f, rc.Width / 2), ry = Math.Max(0.5f, rc.Height / 2), cx = rc.Left + rx, cy = rc.Top + ry;
+                    if (Filled)
+                    {
+                        float dx = (x - cx) / (rx + reach), dy = (y - cy) / (ry + reach);
+                        return dx * dx + dy * dy <= 1;
+                    }
+                    InkPoint prev = new InkPoint(cx + rx, cy, 0);
+                    for (int i = 1; i <= 64; i++)
+                    {
+                        double a = i * Math.PI / 32;
+                        var pt = new InkPoint(cx + rx * (float)Math.Cos(a), cy + ry * (float)Math.Sin(a), 0);
+                        if (SegmentDist2(x, y, prev, pt) <= reach2) return true;
+                        prev = pt;
+                    }
+                    return false;
+                }
+                case InkTool.Arrow:
+                {
+                    if (Points.Length < 2) return false;
+                    if (SegmentDist2(x, y, Points[0], Points[1]) <= reach2) return true;
+                    PointF[] head = InkRenderer.ArrowHeadPoints(Points[0], Points[1], Width);
+                    return SegmentDist2(x, y, Pt(head[0]), Pt(head[1])) <= reach2 || SegmentDist2(x, y, Pt(head[1]), Pt(head[2])) <= reach2
+                        || SegmentDist2(x, y, Pt(head[2]), Pt(head[0])) <= reach2;
+                }
+            }
             if (Points.Length == 1) return Dist2(x, y, Points[0].X, Points[0].Y) <= reach2;
             for (int i = 1; i < Points.Length; i++)
                 if (SegmentDist2(x, y, Points[i - 1], Points[i]) <= reach2) return true;
             return false;
         }
+
+        // Shapes: the rectangle between the two corners.
+        public RectangleF ShapeRect
+        {
+            get
+            {
+                if (Points.Length < 2) return RectangleF.Empty;
+                return RectangleF.FromLTRB(Math.Min(Points[0].X, Points[1].X), Math.Min(Points[0].Y, Points[1].Y),
+                                           Math.Max(Points[0].X, Points[1].X), Math.Max(Points[0].Y, Points[1].Y));
+            }
+        }
+
+        static InkPoint Pt(PointF p) { return new InkPoint(p.X, p.Y, 0); }
 
         static float Dist2(float ax, float ay, float bx, float by) { float dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; }
 
@@ -71,32 +197,61 @@ namespace LiveWall.Ink
             return Dist2(px, py, a.X + vx * t, a.Y + vy * t);
         }
 
+        static readonly string[] ToolNames = { "pen", "hl", "line", "arrow", "rect", "ellipse", "fill", "text", "erase" };
+
         internal string Serialize()
         {
             var ci = CultureInfo.InvariantCulture;
             var sb = new StringBuilder(32 + Points.Length * 12);
             sb.Append("+ ").Append(Id).Append(' ').Append(Author).Append(' ').Append(Ticks.ToString(ci)).Append(' ')
-              .Append(Tool == InkTool.Highlighter ? "hl" : "pen").Append(' ').Append(Argb.ToString("X8", ci)).Append(' ')
+              .Append(ToolNames[(int)Tool]).Append(Filled ? "+fill" : "").Append(' ').Append(Argb.ToString("X8", ci)).Append(' ')
               .Append(Width.ToString("0.##", ci)).Append(' ');
-            for (int i = 0; i < Points.Length; i++)
+            if (Tool == InkTool.Fill) sb.Append(Mask.Serialize());
+            else
+                for (int i = 0; i < Points.Length; i++)
+                {
+                    if (i > 0) sb.Append(';');
+                    sb.Append(((int)Math.Round(Points[i].X)).ToString(ci)).Append(',')
+                      .Append(((int)Math.Round(Points[i].Y)).ToString(ci)).Append(',')
+                      .Append(Points[i].P.ToString(ci));
+                }
+            if (Tool == InkTool.Text)
             {
-                if (i > 0) sb.Append(';');
-                sb.Append(((int)Math.Round(Points[i].X)).ToString(ci)).Append(',')
-                  .Append(((int)Math.Round(Points[i].Y)).ToString(ci)).Append(',')
-                  .Append(Points[i].P.ToString(ci));
+                sb.Append(" font=").Append(Uri.EscapeDataString(Font ?? "Segoe UI"))
+                  .Append(" b=").Append(Bold ? '1' : '0').Append(" i=").Append(Italic ? '1' : '0')
+                  .Append(" fx=").Append(Effect ?? InkText.Plain)
+                  .Append(" t=").Append(Uri.EscapeDataString(Text ?? ""));
             }
+            if (Base != null) sb.Append(" z=").Append(Base);
             return sb.ToString();
         }
 
         internal static InkStroke Parse(string[] f)
         {
-            // + id author ticks tool argb width points
+            InkStroke s = ParseElement(f);
+            if (s == null) return null;
+            for (int i = 8; i < f.Length; i++) if (f[i].StartsWith("z=")) return s.WithBase(f[i].Substring(2));
+            return s;
+        }
+
+        static InkStroke ParseElement(string[] f)
+        {
+            // + id author ticks tool argb width points [key=value ...]
             if (f.Length < 8) return null;
             var ci = CultureInfo.InvariantCulture;
             long ticks; int argb; float width;
             if (!long.TryParse(f[3], NumberStyles.Integer, ci, out ticks)) return null;
             if (!int.TryParse(f[5], NumberStyles.HexNumber, ci, out argb)) return null;
             if (!float.TryParse(f[6], NumberStyles.Float, ci, out width)) return null;
+            bool filled = f[4].EndsWith("+fill");
+            int ti = Array.IndexOf(ToolNames, filled ? f[4].Substring(0, f[4].Length - 5) : f[4]);
+            if (ti < 0) return null;   // from a newer version
+            var tool = (InkTool)ti;
+            if (tool == InkTool.Fill)
+            {
+                var mask = InkFill.Mask.Parse(f[7]);
+                return mask == null ? null : FillRegion(f[1], f[2], ticks, argb, mask);
+            }
             var pts = new List<InkPoint>();
             foreach (string t in f[7].Split(';'))
             {
@@ -107,7 +262,27 @@ namespace LiveWall.Ink
                 pts.Add(new InkPoint(x, y, (byte)Math.Max(0, Math.Min(255, p))));
             }
             if (pts.Count == 0) return null;
-            return new InkStroke(f[1], f[2], ticks, f[4] == "hl" ? InkTool.Highlighter : InkTool.Pen, argb, width, pts.ToArray());
+            if (tool == InkTool.Text)
+            {
+                string text = null, font = "Segoe UI", fx = InkText.Plain;
+                bool bold = false, italic = false;
+                for (int i = 8; i < f.Length; i++)
+                {
+                    int eq = f[i].IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = f[i].Substring(0, eq), v = f[i].Substring(eq + 1);
+                    if (k == "t") text = Uri.UnescapeDataString(v);
+                    else if (k == "font") font = Uri.UnescapeDataString(v);
+                    else if (k == "b") bold = v == "1";
+                    else if (k == "i") italic = v == "1";
+                    else if (k == "fx") fx = v;
+                }
+                if (string.IsNullOrEmpty(text)) return null;
+                return TextItem(f[1], f[2], ticks, argb, width, new PointF(pts[0].X, pts[0].Y), text, font, bold, italic, fx);
+            }
+            if (tool != InkTool.Pen && tool != InkTool.Highlighter && tool != InkTool.Erase)
+                return pts.Count < 2 ? null : Shape(f[1], f[2], ticks, tool, argb, width, pts[0], pts[1], filled);
+            return new InkStroke(f[1], f[2], ticks, tool, argb, width, pts.ToArray());
         }
     }
 
@@ -119,6 +294,10 @@ namespace LiveWall.Ink
     //   title <text>                    informational (the wallpaper's path, or the board's name)
     //   bg <style> <author> <ticks>     background style (last one wins)
     //   + <id> <author> <ticks> <tool> <argb> <width> <x,y,p;x,y,p;...>    add a stroke
+    //       tool: pen, hl; line, arrow, rect, ellipse (two points, "+fill" = filled); fill (<width> unused, points =
+    //       the region, see InkFill.Mask); text (width = font size, one point, then font= b= i= fx= t= escaped fields);
+    //       erase (width = eraser diameter; clears everything drawn before it along its path)
+    //       optional z=<id>: replaces that element and takes its place in the drawing order (recolor, edited text)
     //   - <id> <author> <ticks>         erase a stroke
     //   ~ <id> <author> <ticks>         restore an erased stroke (undo of an erase)
     // Each stroke has a globally unique id and never changes, so logs from several people can simply be merged.
@@ -175,7 +354,7 @@ namespace LiveWall.Ink
                         case "+":
                         {
                             var s = InkStroke.Parse(f);
-                            if (s != null && !doc.byId.ContainsKey(s.Id)) { doc.strokes.Add(s); doc.byId[s.Id] = s; }
+                            if (s != null && !doc.byId.ContainsKey(s.Id)) doc.Insert(s);
                             break;
                         }
                         case "-": if (f.Length >= 2) doc.erased.Add(f[1]); break;
@@ -186,6 +365,15 @@ namespace LiveWall.Ink
             }
             catch (Exception ex) { Log.Error("Could not read drawing " + path, ex); }
             return doc;
+        }
+
+        // In drawing order: after the element it replaces (so erasing drawn later still applies to it), else on top.
+        void Insert(InkStroke s)
+        {
+            InkStroke replaced;
+            int at = s.Base != null && byId.TryGetValue(s.Base, out replaced) ? strokes.IndexOf(replaced) + 1 : strokes.Count;
+            strokes.Insert(at, s);
+            byId[s.Id] = s;
         }
 
         public List<InkStroke> VisibleStrokes()
@@ -202,8 +390,7 @@ namespace LiveWall.Ink
         public void Add(InkStroke s)
         {
             if (byId.ContainsKey(s.Id)) return;
-            strokes.Add(s);
-            byId[s.Id] = s;
+            Insert(s);
             Revision++;
             Append(new[] { s.Serialize() });
         }

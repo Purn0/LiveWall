@@ -84,9 +84,9 @@ namespace LiveWall
         void AddBoardItems()
         {
             var boards = new MenuItem("Board");
-            boards.MenuItems.Add(new MenuItem("Today's board" + ShortcutText(app.BoardHotkey), (s, e) => app.ShowBoard(BoardKind.Daily, DateTime.Today, true))
+            boards.MenuItems.Add(new MenuItem("Today's board" + ShortcutText(app.BoardHotkey), (s, e) => app.ShowBoard(BoardKind.Daily, DateTime.Today, false))
                 { RadioCheck = true, Checked = app.TodaysBoardShown });
-            boards.MenuItems.Add(new MenuItem("Permanent board", (s, e) => app.ShowBoard(BoardKind.Permanent, DateTime.Today, true))
+            boards.MenuItems.Add(new MenuItem("Permanent board", (s, e) => app.ShowBoard(BoardKind.Permanent, DateTime.Today, false))
                 { RadioCheck = true, Checked = app.PermanentBoardShown });
             var earlier = new MenuItem("Earlier days");
             foreach (DateTime day in app.EarlierDailyBoards())
@@ -99,7 +99,7 @@ namespace LiveWall
             boards.MenuItems.Add(earlier);
             boards.MenuItems.Add("-");
             boards.MenuItems.Add(new MenuItem("Back to the wallpaper", (s, e) => app.ExitBoard()) { Enabled = app.BoardShown });
-            boards.MenuItems.Add(new MenuItem("Open boards folder", (s, e) => app.OpenBoardsFolder()));
+            boards.MenuItems.Add(new MenuItem("Open board pictures", (s, e) => app.OpenBoardsFolder()));
             menu.MenuItems.Add(boards);
 
             string target = app.HasWallpaper ? "Draw on the wallpaper" : "Draw on the board";
