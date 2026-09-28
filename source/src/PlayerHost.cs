@@ -31,24 +31,32 @@ namespace LiveWall
     // `LiveWall.exe --host ...`: plays ONE video into ONE surface window, then exits when told to.
     //
     // Why a separate process: the Media Foundation Media Engine is the most power-efficient way to play video
-    // (GPU decode + scaling, no per-frame work in LiveWall), but it keeps a (silent) audio stream open for as long as
-    // the process lives, even after the engine is shut down. An open audio stream keeps the audio hardware awake
-    // and can stop Windows from sleeping. Ending the host process whenever the wallpaper stops playing releases it.
+    // (GPU decode + scaling, no per-frame work in LiveWall), but what it holds (decoder, GPU memory, its audio client)
+    // is only fully released when the process ends. So the host process ends whenever the wallpaper stops playing.
+    // The engine never sees the file's audio (VideoOnlySource): even force-muted it would otherwise keep a silent audio
+    // stream running as its clock, which keeps the sound device awake the whole time a video plays.
     internal static class PlayerHost
     {
         // host -> controller: wParam = (event << 24) | playerId, lParam = data
         public const uint WM_HOST_EVENT = Native.WM_APP + 20;
-        public const int EVT_READY = 1, EVT_FIRST_FRAME = 2, EVT_ERROR = 3, EVT_LOST = 4, EVT_REVEALED = 5;
-        // controller -> host
+        public const int EVT_READY = 1, EVT_FIRST_FRAME = 2, EVT_ERROR = 3, EVT_LOST = 4, EVT_REVEALED = 5, EVT_FADED = 6;
+        // controller -> host (REVEAL / FADEOUT: wParam = fade time in ms, 0 = at once)
         public const uint WM_HOST_PLAY = Native.WM_APP + 30, WM_HOST_PAUSE = Native.WM_APP + 31,
-            WM_HOST_FIT = Native.WM_APP + 32, WM_HOST_EXIT = Native.WM_APP + 33, WM_HOST_REVEAL = Native.WM_APP + 34;
+            WM_HOST_FIT = Native.WM_APP + 32, WM_HOST_EXIT = Native.WM_APP + 33, WM_HOST_REVEAL = Native.WM_APP + 34,
+            WM_HOST_FADEOUT = Native.WM_APP + 35;
         internal const uint WM_ENGINE_EVENT = Native.WM_APP + 40;
+        static readonly IntPtr TimerFade = new IntPtr(1);
+
+        // Window fade (opacity), only while fading.
+        static int fadeFrom, fadeTo, fadeStart, fadeMs, alpha;
+        static bool fading;
 
         static IntPtr controller, commandWindow;
         static int playerId;
         static WallpaperWindow surface;
         static IMFMediaEngineEx engine;
         static HostEngineNotify notify;
+        static VideoOnlyExtension videoOnly;   // hides the file's audio from the engine (see VideoOnlySource)
         static WndProc commandProc;
         static FitMode fit;
         static int width, height;
@@ -134,9 +142,11 @@ namespace LiveWall
         {
             var factory = (IMFMediaEngineClassFactory)Activator.CreateInstance(Type.GetTypeFromCLSID(MF.CLSID_MFMediaEngineClassFactory));
             IMFAttributes attrs;
-            MF.Check(MF.MFCreateAttributes(out attrs, 3), "MFCreateAttributes");
+            MF.Check(MF.MFCreateAttributes(out attrs, 4), "MFCreateAttributes");
             notify = new HostEngineNotify { Window = commandWindow };
             attrs.SetUnk(MF.MF_MEDIA_ENGINE_CALLBACK, notify);
+            videoOnly = new VideoOnlyExtension();
+            attrs.SetUnk(MF.MF_MEDIA_ENGINE_EXTENSION, videoOnly);
             attrs.SetU64(MF.MF_MEDIA_ENGINE_PLAYBACK_HWND, (ulong)surface.Handle.ToInt64());
             attrs.SetU32(MF.MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, 87 /* DXGI_FORMAT_B8G8R8A8_UNORM */);
             MF.Check(factory.CreateInstance(MF.MF_MEDIA_ENGINE_FORCEMUTE, attrs, out engine), "Media engine");
@@ -177,9 +187,13 @@ namespace LiveWall
                         ApplyFit();
                         return IntPtr.Zero;
                     case WM_HOST_REVEAL:
-                        surface.Reveal();
-                        Native.DwmFlush();   // wait until it is composited, so the old wallpaper can go without a gap
-                        Send(EVT_REVEALED, 0);
+                        FadeTo(255, (int)wParam.ToInt64());   // then EVT_REVEALED: the old wallpaper can go
+                        return IntPtr.Zero;
+                    case WM_HOST_FADEOUT:
+                        FadeTo(0, (int)wParam.ToInt64());     // then EVT_FADED: this host can go
+                        return IntPtr.Zero;
+                    case Native.WM_TIMER:
+                        if (wParam == TimerFade) OnFadeTick();
                         return IntPtr.Zero;
                     case WM_HOST_EXIT:
                         Exit();
@@ -197,6 +211,7 @@ namespace LiveWall
             {
                 case MF.EVENT_LOADEDMETADATA:
                     metadataLoaded = true;
+                    DropAudio();
                     ApplyFit();
                     if (wantPlaying) engine.Play();
                     break;
@@ -216,6 +231,77 @@ namespace LiveWall
                     Exit();
                     break;
             }
+        }
+
+        // Wallpaper changes fade: the window's opacity eases to `to` over `ms` (a timer only while fading).
+        static void FadeTo(int to, int ms)
+        {
+            if (ms <= 0 || alpha == to)
+            {
+                if (fading) { fading = false; Native.KillTimer(commandWindow, TimerFade); }
+                alpha = to;
+                surface.SetAlpha((byte)to);
+                FadeDone();
+                return;
+            }
+            fadeFrom = alpha;
+            fadeTo = to;
+            fadeStart = Environment.TickCount;
+            fadeMs = ms;
+            if (!fading) { fading = true; Native.SetTimer(commandWindow, TimerFade, 16, IntPtr.Zero); }
+        }
+
+        static void OnFadeTick()
+        {
+            if (!fading) { Native.KillTimer(commandWindow, TimerFade); return; }
+            double t = Math.Min(1.0, (Environment.TickCount - fadeStart) / (double)fadeMs);
+            double eased = t * t * (3 - 2 * t);
+            alpha = (int)Math.Round(fadeFrom + (fadeTo - fadeFrom) * eased);
+            surface.SetAlpha((byte)alpha);
+            if (t < 1) return;
+            fading = false;
+            Native.KillTimer(commandWindow, TimerFade);
+            FadeDone();
+        }
+
+        static void FadeDone()
+        {
+            Native.DwmFlush();   // composited: whatever is below can change now without a gap
+            Send(alpha == 0 ? EVT_FADED : EVT_REVEALED, 0);
+        }
+
+        // The wallpaper never plays sound (music, including a video's own soundtrack, is the music host's job). Fallback
+        // for a source VideoOnlySource could not wrap: at least stop decoding the audio (the engine's clock stream stays).
+        static void DropAudio()
+        {
+            uint count;
+            if (engine.GetNumberOfStreams(out count) < 0) return;
+            int dropped = 0;
+            for (uint i = 0; i < count; i++)
+            {
+                Guid major;
+                if (StreamMajorType(i, out major) && major == MF.MFMediaType_Audio && engine.SetStreamSelection(i, 0) >= 0) dropped++;
+            }
+            if (dropped == 0) return;   // the usual case: VideoOnlySource already hid the audio
+            int hr = engine.ApplyStreamSelections();
+            Log.Info("Player host: audio still visible to the engine; turned off " + dropped + " audio stream(s) of " + count + (hr < 0 ? " (failed 0x" + hr.ToString("X8") + ")" : ""));
+        }
+
+        static bool StreamMajorType(uint stream, out Guid major)
+        {
+            major = Guid.Empty;
+            IntPtr pv = Marshal.AllocCoTaskMem(24);   // PROPVARIANT
+            try
+            {
+                for (int b = 0; b < 24; b += 4) Marshal.WriteInt32(pv, b, 0);
+                Guid key = MF.MF_MT_MAJOR_TYPE;
+                if (engine.GetStreamAttribute(stream, ref key, pv) < 0) return false;
+                bool ok = Marshal.ReadInt16(pv) == 72 /* VT_CLSID */;
+                if (ok) major = (Guid)Marshal.PtrToStructure(Marshal.ReadIntPtr(pv, 8), typeof(Guid));
+                MF.PropVariantClear(pv);
+                return ok;
+            }
+            finally { Marshal.FreeCoTaskMem(pv); }
         }
 
         // The engine keeps the aspect ratio of the source rectangle, so "fill" crops the source to the window's shape.

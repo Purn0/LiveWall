@@ -43,7 +43,14 @@ namespace LiveWall
             public bool Playing, StateKnown;
             public DateTime StateSince;          // when Hidden/Playing last changed
             public bool Asleep;                  // decoder unloaded while not playing
+            public bool NextFades;               // NextPlayer fades in (a different wallpaper) rather than appearing at once
+            public bool Revealing;               // Player is fading in over Retiring
+            public DateTime RevealStarted;
         }
+
+        const int WallpaperFadeMs = 1000;        // a new video fades in; a video fades out over a new picture or board
+        static readonly IntPtr TimerFadeOut = new IntPtr(9);
+        readonly List<VideoPlayer> fadingOut = new List<VideoPlayer>();   // video windows fading out, then ended
 
         readonly bool autostart;
         readonly bool ecoAlways;
@@ -364,18 +371,27 @@ namespace LiveWall
         {
             Native.KillTimer(window.Handle, TimerSlideshow);
             advanceDeferred = false;
-            if (board != null || settings.IntervalMinutes <= 0 || PlayableCount < 2) return;
-            long ms = Math.Min(int.MaxValue, settings.IntervalMinutes * 60000L);
-            Native.SetCoalescableTimer(window.Handle, TimerSlideshow, (uint)ms, IntPtr.Zero, (uint)Math.Min(30000, ms / 50));
+            slideshowStart = slideshowDue = DateTime.MinValue;
+            if (board == null && settings.IntervalMinutes > 0 && PlayableCount >= 2)
+            {
+                long ms = Math.Min(int.MaxValue, settings.IntervalMinutes * 60000L);
+                Native.SetCoalescableTimer(window.Handle, TimerSlideshow, (uint)ms, IntPtr.Zero, (uint)Math.Min(30000, ms / 50));
+                slideshowStart = DateTime.UtcNow;
+                slideshowDue = slideshowStart.AddMilliseconds(ms);
+            }
+            ScheduleSlideshowMusic();   // the song of this wallpaper fades out just before the change
         }
+
+        // Don't swap videos nobody can see; switch the moment the desktop is visible again.
+        bool SlideshowWouldDefer { get { return currentVideo != null && surfaces.Count > 0 && surfaces.All(s => s.Hidden); } }
 
         void OnSlideshowTimer()
         {
             Native.KillTimer(window.Handle, TimerSlideshow);
+            slideshowDue = DateTime.MinValue;
             if (board != null) return;
             if (editor != null) return;   // never under someone drawing: the slideshow restarts when they finish
-            // Don't swap videos nobody can see; switch the moment the desktop is visible again.
-            if (currentVideo != null && surfaces.Count > 0 && surfaces.All(s => s.Hidden))
+            if (SlideshowWouldDefer)
             {
                 advanceDeferred = true;
                 Log.Debug("Slideshow change deferred until the desktop is visible");
@@ -398,8 +414,8 @@ namespace LiveWall
             Log.Info("Showing " + MediaTypes.Describe(item.Kind).ToLowerInvariant() + ": " + item.Name);
             RefreshInkOverlays();   // this wallpaper's drawings (if any), above it and below the icons
 
-            if (item.Kind == MediaKind.Video) ShowVideo(item, item.Path);
-            else if (item.Kind == MediaKind.Gif && !item.StaticGif && File.Exists(item.ConvertedVideoPath)) ShowVideo(item, item.ConvertedVideoPath);
+            if (item.Kind == MediaKind.Video) ShowVideo(item, item.Path, true);
+            else if (item.Kind == MediaKind.Gif && !item.StaticGif && File.Exists(item.ConvertedVideoPath)) ShowVideo(item, item.ConvertedVideoPath, true);
             else
             {
                 ShowPicture(item);
@@ -441,7 +457,7 @@ namespace LiveWall
             SetNative(item.Path, ok =>
             {
                 if (!IsCurrent(item) || currentVideo != null) return;
-                TearDownSurfaces();   // reveal the new picture only once Windows has it
+                FadeOutSurfaces();   // reveal the new picture only once Windows has it
                 if (!ok && item.Kind == MediaKind.Image) MarkFailed(item, "Windows could not use this image as a wallpaper.");
                 TrimSoon();
             });
@@ -462,13 +478,14 @@ namespace LiveWall
             {
                 if (!IsCurrent(item) || currentVideo != null || board != null) return;   // prefetch, already playing, or a board is up
                 convertStatus = null;
-                if (ok) ShowVideo(item, mp4);
+                if (ok) ShowVideo(item, mp4, true);
                 else if (!item.StaticGif) MarkFailed(item, "This GIF could not be converted to video.");
                 UpdateStatus();
             });
         }
 
-        void ShowVideo(MediaItem item, string videoPath)
+        // fade: a different wallpaper (it fades in); false = the same one again (reload, rebuild: at once, as before).
+        void ShowVideo(MediaItem item, string videoPath, bool fade)
         {
             currentVideo = videoPath;
             if (!host.IsValid && !host.Refresh())
@@ -478,16 +495,17 @@ namespace LiveWall
                 return;
             }
             SyncSurfacesToMonitors();
-            foreach (var s in surfaces) { s.Asleep = false; StartNext(s); }
+            foreach (var s in surfaces) { s.Asleep = false; StartNext(s, fade); }
             SyncNativeToVideo(item);
             StartPolling(1000);
             Evaluate();
         }
 
-        void StartNext(Surface s)
+        void StartNext(Surface s, bool fade)
         {
             DisposeNext(s);
             if (currentVideo == null) return;
+            s.NextFades = fade;
             bool play = !s.Hidden && !VisiblePause();
             bool haveOld = s.Player != null && s.Player.Window != IntPtr.Zero && Native.IsWindow(s.Player.Window);
             try
@@ -511,7 +529,9 @@ namespace LiveWall
             s.Retiring = s.Player;               // ended when the new one reports it is on screen (EVT_REVEALED)
             s.Player = s.NextPlayer;
             s.NextPlayer = null;
-            s.Player.Reveal();
+            s.Player.Reveal(s.NextFades ? WallpaperFadeMs : 0);   // fades in over the previous wallpaper
+            s.Revealing = true;
+            s.RevealStarted = DateTime.UtcNow;
             Log.Debug("Screen " + s.Bounds + " now showing " + Path.GetFileName(s.Player.Path) + " (" + s.Player.Statistics() + ")");
         }
 
@@ -531,6 +551,37 @@ namespace LiveWall
             surfaces.Clear();
             StopPolling();
             Native.KillTimer(window.Handle, TimerPromote);
+        }
+
+        // Like TearDownSurfaces, but the video on screen fades out over the new picture/board first (its host reports
+        // EVT_FADED and is ended then; a timer makes sure it goes even if it never answers).
+        void FadeOutSurfaces()
+        {
+            foreach (var s in surfaces)
+            {
+                DisposeNext(s);
+                if (s.Retiring != null) { s.Retiring.Dispose(); s.Retiring = null; }
+                if (s.Player == null) continue;
+                if (s.Player.Ready && !s.Player.Failed && s.Player.IsWindowVisible) { s.Player.FadeOut(WallpaperFadeMs); fadingOut.Add(s.Player); }
+                else s.Player.Dispose();
+                s.Player = null;
+            }
+            surfaces.Clear();
+            StopPolling();
+            Native.KillTimer(window.Handle, TimerPromote);
+            if (fadingOut.Count > 0)
+            {
+                Log.Debug("Fading out " + fadingOut.Count + " video window(s)");
+                Native.SetTimer(window.Handle, TimerFadeOut, (uint)WallpaperFadeMs + 2000, IntPtr.Zero);
+            }
+        }
+
+        void EndFadedOut(VideoPlayer p)
+        {
+            Log.Debug("Faded out: ending " + p.Statistics());
+            p.Dispose();
+            fadingOut.Remove(p);
+            if (fadingOut.Count == 0) { Native.KillTimer(window.Handle, TimerFadeOut); TrimSoon(); }
         }
 
         void SyncSurfacesToMonitors()
@@ -733,7 +784,7 @@ namespace LiveWall
         {
             Log.Info("Resuming: reloading video");
             s.Asleep = false;
-            StartNext(s);   // starts from the first frame, which is what Windows was showing
+            StartNext(s, false);   // starts from the first frame, which is what Windows was showing
         }
 
         void ScheduleEvaluate(uint ms)
@@ -759,7 +810,11 @@ namespace LiveWall
         void OnPoll()
         {
             if (surfaces.Count == 0 || currentVideo == null) { StopPolling(); return; }
-            foreach (var s in surfaces) if (s.Retiring != null) { s.Retiring.Dispose(); s.Retiring = null; }
+            // The previous video goes once the new one is on screen (not in the middle of its fade-in).
+            DateTime now = DateTime.UtcNow;
+            foreach (var s in surfaces)
+                if (s.Retiring != null && (!s.Revealing || (now - s.RevealStarted).TotalMilliseconds > WallpaperFadeMs + 3000))
+                { s.Retiring.Dispose(); s.Retiring = null; }
             if (!host.IsValid) { ScheduleRebuild("desktop window changed", 500); return; }
             // Keep our surfaces directly below the icons in case Explorer reordered its children.
             if (!inkLayer.AllAlive) RefreshInkOverlays();
@@ -907,6 +962,7 @@ namespace LiveWall
             else if (id == TimerRebuild) { Native.KillTimer(window.Handle, TimerRebuild); Rebuild(); }
             else if (id == TimerRetry) { Native.KillTimer(window.Handle, TimerRetry); RetryVideo(); }
             else if (id == TimerTrim) { Native.KillTimer(window.Handle, TimerTrim); Trim(); }
+            else if (id == TimerFadeOut) { Native.KillTimer(window.Handle, TimerFadeOut); foreach (var p in fadingOut.ToList()) EndFadedOut(p); }
             else if (id == TimerStart) { Native.KillTimer(window.Handle, TimerStart); OnStart(); }
             else if (id == TimerBoardDay) { Native.KillTimer(window.Handle, TimerBoardDay); CheckBoardDay(); }
             else if (id == TimerCollection) OnCollectionTimer();
@@ -963,6 +1019,7 @@ namespace LiveWall
                 case "music-play": if (MusicMuted) ToggleMusicMute(); break;
                 case "music-next": NextTrack(); break;
                 case "music-settings": ShowMusicSettings(); break;
+                case "debug-half-time": OnHalfTime(); break;   // test hook: the half-way song switch now
                 default: ShowSettings(); break;
             }
         }
@@ -990,6 +1047,12 @@ namespace LiveWall
         // A player host reported something (wParam = event << 24 | player id).
         void OnHostEvent(int playerId, int evt, long data)
         {
+            VideoPlayer fading = fadingOut.Find(x => x.Id == playerId);
+            if (fading != null)
+            {
+                if (evt == PlayerHost.EVT_FADED || evt == PlayerHost.EVT_ERROR || evt == PlayerHost.EVT_LOST) EndFadedOut(fading);
+                return;
+            }
             foreach (var s in surfaces)
             {
                 bool isNext = s.NextPlayer != null && s.NextPlayer.Id == playerId;
@@ -1002,7 +1065,12 @@ namespace LiveWall
                     s.NextReadyAt = DateTime.UtcNow;
                     Native.SetTimer(window.Handle, TimerPromote, (uint)PromoteDelay.TotalMilliseconds + 20, IntPtr.Zero);
                 }
-                else if (evt == PlayerHost.EVT_REVEALED && s.Retiring != null) { s.Retiring.Dispose(); s.Retiring = null; }
+                else if (evt == PlayerHost.EVT_REVEALED)
+                {
+                    Log.Debug("Screen " + s.Bounds + " revealed in " + (int)(DateTime.UtcNow - s.RevealStarted).TotalMilliseconds + " ms");
+                    s.Revealing = false;
+                    if (s.Retiring != null) { s.Retiring.Dispose(); s.Retiring = null; }
+                }
                 else if (evt == PlayerHost.EVT_LOST) ScheduleRebuild("surface destroyed", 1500);
                 else if (evt == PlayerHost.EVT_ERROR) OnPlaybackError(p);
                 return;
@@ -1012,6 +1080,7 @@ namespace LiveWall
         // A player process ended. Expected when we disposed it; otherwise it crashed or was killed.
         void OnHostExited(VideoPlayer p)
         {
+            if (fadingOut.Contains(p)) { EndFadedOut(p); return; }
             if (p.Disposed || exiting) return;
             bool known = surfaces.Any(s => s.Player == p || s.NextPlayer == p);
             if (!known) return;
@@ -1067,7 +1136,7 @@ namespace LiveWall
             TearDownSurfaces();
             host.Refresh();
             if (!inkLayer.AllAlive) RefreshInkOverlays();
-            ShowVideo(item, video);
+            ShowVideo(item, video, false);
         }
 
         void ScheduleRebuild(string reason, uint delayMs)
@@ -1116,7 +1185,7 @@ namespace LiveWall
             var item = current;
             TearDownSurfaces();
             RefreshInkOverlays();
-            ShowVideo(item, video);
+            ShowVideo(item, video, false);
         }
 
         void Shutdown()
@@ -1126,7 +1195,7 @@ namespace LiveWall
             Log.Info("Exiting");
             foreach (IntPtr h in hooks) Native.UnhookWinEvent(h);
             hooks.Clear();
-            foreach (var id in new[] { TimerPoll, TimerSlideshow, TimerEvaluateSoon, TimerRebuild, TimerPromote, TimerStart, TimerRetry, TimerTrim, TimerBoardDay, TimerCollection })
+            foreach (var id in new[] { TimerPoll, TimerSlideshow, TimerEvaluateSoon, TimerRebuild, TimerPromote, TimerStart, TimerRetry, TimerTrim, TimerBoardDay, TimerCollection, TimerFadeOut })
                 Native.KillTimer(window.Handle, id);
             ShutdownInk();
             ShutdownMusic();
@@ -1134,6 +1203,8 @@ namespace LiveWall
             if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.Close();
             if (tray != null) { tray.Dispose(); tray = null; }
             TearDownSurfaces();
+            foreach (var p in fadingOut) p.Dispose();
+            fadingOut.Clear();
             settings.Save();
             worker.Dispose();
             window.Dispose();

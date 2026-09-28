@@ -49,9 +49,12 @@ namespace LiveWall
                 Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
         }
 
-        public void Reveal()
+        public void Reveal() { SetAlpha(255); }
+
+        // 0 = invisible, 255 = opaque (DWM blends it over whatever is below: the previous wallpaper during a fade).
+        public void SetAlpha(byte alpha)
         {
-            if (Handle != IntPtr.Zero) Native.SetLayeredWindowAttributes(Handle, 0, 255, Native.LWA_ALPHA);
+            if (Handle != IntPtr.Zero) Native.SetLayeredWindowAttributes(Handle, 0, alpha, Native.LWA_ALPHA);
         }
 
         public void Dispose()

@@ -121,7 +121,8 @@ namespace LiveWall
                            "energetic, dark, happy, dreamy or cozy - or the whole folder if there is none. \"The video's own sound\" plays the " +
                            "video wallpaper's soundtrack (the video itself stays muted)."));
             Add(root, Note("With 3 or more wallpapers in a slideshow, each wallpaper gets its own song, repeated (changing every 15 minutes " +
-                           "or less), or two songs taking turns (longer). With one or two wallpapers, or on a board, the songs just play on."));
+                           "or less), or one song for the first half of its time and another for the second half (longer). The song fades " +
+                           "out just before the wallpaper changes. With one or two wallpapers, or on a board, the songs just play on."));
             Add(root, Header("Playback", false));
             Add(root, Line(Label("Volume (%)"), volumeBox, Label("   Pause / play shortcut"), hotkeyBox));
             Add(root, otherBox);

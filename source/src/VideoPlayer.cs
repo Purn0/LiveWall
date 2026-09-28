@@ -131,8 +131,12 @@ namespace LiveWall
 
         public bool IsWindowVisible { get { return Window != IntPtr.Zero && Native.IsWindowVisible(Window); } }
 
-        // Make the (already rendering, fully transparent) window opaque; the host answers with EVT_REVEALED.
-        public void Reveal() { Post(PlayerHost.WM_HOST_REVEAL, IntPtr.Zero, IntPtr.Zero); }
+        // Make the (already rendering, fully transparent) window opaque, at once or fading in over fadeMs; the host
+        // answers with EVT_REVEALED.
+        public void Reveal(int fadeMs) { Post(PlayerHost.WM_HOST_REVEAL, new IntPtr(fadeMs), IntPtr.Zero); }
+
+        // Fade the window out (a picture or board takes over below it); the host answers with EVT_FADED.
+        public void FadeOut(int fadeMs) { Post(PlayerHost.WM_HOST_FADEOUT, new IntPtr(fadeMs), IntPtr.Zero); }
 
         void Post(uint msg, IntPtr wParam, IntPtr lParam)
         {

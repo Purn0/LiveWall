@@ -66,15 +66,18 @@ Music
   of an app in front? Ctrl+Alt+M plays it anyway while that window stays in front. The Start menu also gets
   "LiveWall Music" (same thing): pin it to the taskbar for a one-click music button.
 - With 3 or more wallpapers in a slideshow, each wallpaper gets its own song, repeated (changing every 15 minutes or
-  less) or two songs taking turns (longer). With one or two wallpapers, or on a board, the songs just play on.
+  less), or one song for the first half of its time and another for the second half (longer). The song fades out
+  just before the wallpaper changes, and the new wallpaper fades in with its new song. With one or two wallpapers,
+  or on a board, the songs just play on.
 - Tray icon > Music: Play/Pause, Next track, Volume, "Silence while other apps play sound", For this wallpaper.
 - Optional: "Ask AI (Claude) for the mood" sends each wallpaper's picture once to Anthropic with your own API key
   (stored encrypted for your Windows account). Off by default; without it the mood comes from the colors.
 
 What it does to save battery
 - Pictures are handed to Windows as a normal wallpaper: no cost at all while shown.
-- Videos are decoded and scaled by the graphics chip (hardware decoding), always muted, with no per-frame
-  work in LiveWall itself. About 0.5% CPU for 1080p on an i7-1260P.
+- Videos are decoded and scaled by the graphics chip (hardware decoding), with no per-frame work in LiveWall
+  itself. About 0.5% CPU for 1080p on an i7-1260P. A video's soundtrack is not decoded and no audio stream is
+  opened, so the sound card can sleep while a video plays. Changing wallpapers fades (about a second).
 - GIFs are converted once into hardware-decoded H.264 video (cached), which is far cheaper than drawing GIFs.
 - Playback pauses when you cannot see it: desktop covered by windows, fullscreen apps/games, locked PC,
   screen off, and optionally on battery or with Energy Saver on.

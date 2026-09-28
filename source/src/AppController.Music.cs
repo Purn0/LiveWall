@@ -21,7 +21,7 @@ namespace LiveWall
     internal sealed partial class AppController
     {
         static readonly IntPtr TimerMusicGrace = new IntPtr(30), TimerMusicMeter = new IntPtr(31), TimerMusicRetry = new IntPtr(32),
-            TimerMusicCheck = new IntPtr(33);
+            TimerMusicCheck = new IntPtr(33), TimerMusicPrefade = new IntPtr(34), TimerMusicHalf = new IntPtr(35);
         static readonly TimeSpan FullscreenSettle = TimeSpan.FromMilliseconds(1500);   // an app in front this long: fade out
         static readonly TimeSpan FrontResumeDelay = TimeSpan.FromMilliseconds(2000);   // gone from the front this long: fade in
         const uint WM_AUDIO_NOTIFY = Native.WM_APP + 23;
@@ -65,6 +65,12 @@ namespace LiveWall
         int musicSetPos;
         string musicSetFor;                      // the wallpaper the set was chosen for
         string lastSetSong;                      // the song of the last set, when the source changed under it
+
+        // The slideshow's current period (set by ScheduleNextAdvance; MinValue = no change coming): two songs split it
+        // in halves, and the song fades out just before the wallpaper changes.
+        DateTime slideshowStart = DateTime.MinValue, slideshowDue = DateTime.MinValue;
+        DateTime prefadeArmed = DateTime.MinValue, halfArmed = DateTime.MinValue;
+        string prefadeFor;                       // fading out ahead of this wallpaper's change (the change follows the fade)
         string musicReason = "";                 // why it is silent ("" = playing, or nothing to play)
         string musicBaseReason;                  // silent for a reason other than other apps' audio (null = none)
         bool musicReady;                         // this wallpaper has music and its tracks are known
@@ -97,15 +103,17 @@ namespace LiveWall
             }
         }
 
-        bool LoopCurrent { get { return musicLoopSource || musicSet.Count == 1 || (musicSet.Count == 0 && musicQueue.Count == 1); } }
+        // A wallpaper's song repeats (for its whole time, or its half); the queue loops only a single track.
+        bool LoopCurrent { get { return musicLoopSource || musicSet.Count > 0 || musicQueue.Count == 1; } }
 
-        // 0 = the queue plays on; 1 = one repeating song per wallpaper; 2 = two alternating songs per wallpaper.
+        // 0 = the queue plays on; 1 = one repeating song per wallpaper; 2 = one song for the first half of the
+        // wallpaper's time and another for the second half. No slideshow (interval "never"): the queue plays on.
         int SongsPerWallpaper
         {
             get
             {
-                if (board != null || PlayableCount < 3) return 0;
-                return settings.IntervalMinutes > 0 && settings.IntervalMinutes <= 15 ? 1 : 2;
+                if (board != null || PlayableCount < 3 || settings.IntervalMinutes <= 0) return 0;
+                return settings.IntervalMinutes <= 15 ? 1 : 2;
             }
         }
 
@@ -526,12 +534,14 @@ namespace LiveWall
             UpdateFrontHook();
             if (reason == null && audio != null && !otherAudible && hostState != HostState.Playing) PrecheckOtherAudio();
             if (reason == null && otherAudible) reason = "another app is playing sound";
+            if (reason == null && prefadeFor != null) reason = "changing wallpaper";   // faded out; the change comes next
 
             musicReason = reason ?? "";
             if (reason == null) PlayMusic();
             else if (preparing && hostState == HostState.Playing) { }   // keep the current music until the next source is known
             else SilenceMusic(reason);
             ScheduleMeter();
+            ScheduleSlideshowMusic();
         }
 
         // Silence that does not depend on other apps' audio.
@@ -739,13 +749,13 @@ namespace LiveWall
                         if (hostState == HostState.Pausing) hostState = HostState.Paused;   // (a later "play" already turned it around)
                         Log.Debug("Music: paused at " + TimeSpan.FromMilliseconds(data).ToString(@"m\:ss"));
                     }
+                    if (prefadeFor != null && hostState == HostState.Paused) FinishPrefade();   // silent now: change the wallpaper
                     UpdateMusic();   // switches track (crossfade), or starts the grace period
                     UpdateStatus();
                     break;
                 case MusicHost.EVT_ENDED:
                     if (seq != hostSeq) break;
-                    if (musicSet.Count > 0) musicSetPos = (musicSetPos + 1) % musicSet.Count;   // this wallpaper's song(s) again
-                    else AdvanceQueue();
+                    if (musicSet.Count == 0) AdvanceQueue();   // (a wallpaper's song repeats; it ends only if loaded before its set)
                     musicPositionMs = 0;
                     if (hostState == HostState.Playing && musicReason.Length == 0 && CurrentTrack != null) LoadTrack(CurrentTrack, 0, false);
                     else { hostState = HostState.Paused; UpdateMusic(); }
@@ -930,8 +940,69 @@ namespace LiveWall
             if (id == TimerMusicGrace) OnMusicGrace();
             else if (id == TimerMusicMeter) OnMeterTimer();
             else if (id == TimerMusicRetry || id == TimerMusicCheck) { Native.KillTimer(window.Handle, id); UpdateMusic(); UpdateStatus(); }
+            else if (id == TimerMusicHalf) { Native.KillTimer(window.Handle, id); halfArmed = DateTime.MinValue; OnHalfTime(); }
+            else if (id == TimerMusicPrefade) { Native.KillTimer(window.Handle, id); prefadeArmed = DateTime.MinValue; OnPrefade(); }
             else return false;
             return true;
+        }
+
+        // ================================================================== slideshow timing
+
+        // Two one-shot timers, armed only when they can do something: the half-way switch to a wallpaper's second song,
+        // and the fade-out 1.5 s before the slideshow changes a wallpaper whose song goes with it.
+        void ScheduleSlideshowMusic()
+        {
+            bool slideshow = slideshowDue != DateTime.MinValue && board == null && editor == null;
+            DateTime half = slideshow && musicSet.Count == 2 && musicSetPos == 0
+                ? slideshowStart.AddTicks((slideshowDue - slideshowStart).Ticks / 2) : DateTime.MinValue;
+            ArmAt(TimerMusicHalf, half, ref halfArmed, 1000);
+            if (prefadeFor != null) return;   // its watchdog is running
+            bool songChanges = musicSet.Count > 0 || musicLoopSource;
+            DateTime pre = slideshow && songChanges && music != null && hostState == HostState.Playing && musicReason.Length == 0
+                ? slideshowDue.AddMilliseconds(-MusicHost.FadeMs) : DateTime.MinValue;
+            ArmAt(TimerMusicPrefade, pre, ref prefadeArmed, 50);
+        }
+
+        void ArmAt(IntPtr id, DateTime at, ref DateTime armed, uint tolerance)
+        {
+            if (at == armed) return;
+            armed = at;
+            if (at == DateTime.MinValue) { Native.KillTimer(window.Handle, id); return; }
+            double ms = (at - DateTime.UtcNow).TotalMilliseconds;
+            Native.SetCoalescableTimer(window.Handle, id, (uint)Math.Max(10, Math.Min(int.MaxValue, ms)), IntPtr.Zero, tolerance);
+        }
+
+        void OnHalfTime()
+        {
+            if (musicSet.Count != 2 || musicSetPos != 0) return;
+            musicSetPos = 1;
+            musicPositionMs = 0;
+            Log.Info("Music: half-way through this wallpaper, next song: " + Path.GetFileNameWithoutExtension(CurrentTrack));
+            UpdateMusic();   // a different track than the host has: fade out, switch, fade in
+            UpdateStatus();
+        }
+
+        // 1.5 s before the change: fade the song out; the wallpaper changes once it is silent (FinishPrefade).
+        void OnPrefade()
+        {
+            if (prefadeFor != null) { Log.Warn("Music: the fade-out before the wallpaper change did not report back"); FinishPrefade(); UpdateMusic(); return; }
+            if (music == null || hostState != HostState.Playing || musicReason.Length > 0 || board != null || editor != null ||
+                slideshowDue == DateTime.MinValue || SlideshowWouldDefer) return;
+            prefadeFor = MusicWallpaperKey;
+            music.Pause();
+            hostState = HostState.Pausing;
+            Log.Info("Music: fading out before the wallpaper changes");
+            Native.SetTimer(window.Handle, TimerMusicPrefade, (uint)MusicHost.FadeMs + 2500, IntPtr.Zero);   // watchdog
+        }
+
+        void FinishPrefade()
+        {
+            string wall = prefadeFor;
+            prefadeFor = null;
+            Native.KillTimer(window.Handle, TimerMusicPrefade);
+            prefadeArmed = DateTime.MinValue;
+            // Still the same wallpaper (not changed meanwhile by the slideshow timer or by hand): change it now.
+            if (wall != null && wall == MusicWallpaperKey && slideshowDue != DateTime.MinValue) OnSlideshowTimer();
         }
 
         // Music without a video wallpaper still has to notice fullscreen apps (foreground changes).
@@ -942,7 +1013,10 @@ namespace LiveWall
             return "music: " + (musicReason.Length > 0 ? "silent (" + musicReason + ")" : MusicPlaying ? "playing" : "off") +
                    " host=" + (music == null ? "-" : "pid " + music.ProcessId + " " + hostState) +
                    " track=" + (CurrentTrack == null ? "-" : Path.GetFileName(CurrentTrack) + " @" + TimeSpan.FromMilliseconds(musicPositionMs).ToString(@"m\:ss")) +
-                   " source=" + (musicKey ?? "-") + " songsPerWallpaper=" + SongsPerWallpaper + " set=" + musicSet.Count +
+                   " source=" + (musicKey ?? "-") + " songsPerWallpaper=" + SongsPerWallpaper + " set=" + musicSet.Count + "/" + musicSetPos +
+                   " nextChange=" + (slideshowDue == DateTime.MinValue ? "-" : ((int)(slideshowDue - DateTime.UtcNow).TotalSeconds) + "s") +
+                   " prefade=" + (prefadeFor != null ? "fading" : prefadeArmed != DateTime.MinValue ? "armed" : "-") +
+                   " half=" + (halfArmed != DateTime.MinValue ? "armed" : "-") +
                    " otherAudible=" + otherAudible + " meter=" + meterRunning + " grace=" + musicGraceRunning +
                    " front=" + (frontWindow == IntPtr.Zero ? "-" : frontWhat + (frontWindow == frontOverride ? " (playing anyway)" : "")) +
                    " frontHook=" + (frontHook != IntPtr.Zero) + " | audio: " + (audio == null ? "not watching" : audio.Describe());
@@ -950,7 +1024,8 @@ namespace LiveWall
 
         void ShutdownMusic()
         {
-            foreach (var id in new[] { TimerMusicGrace, TimerMusicMeter, TimerMusicRetry, TimerMusicCheck }) Native.KillTimer(window.Handle, id);
+            foreach (var id in new[] { TimerMusicGrace, TimerMusicMeter, TimerMusicRetry, TimerMusicCheck, TimerMusicPrefade, TimerMusicHalf })
+                Native.KillTimer(window.Handle, id);
             if (frontHook != IntPtr.Zero) { Native.UnhookWinEvent(frontHook); frontHook = IntPtr.Zero; }
             if (musicForm != null && !musicForm.IsDisposed) musicForm.Close();
             if (music != null) { music.Dispose(); music = null; }

@@ -271,7 +271,7 @@ namespace LiveWall
                 SetNative(path, set =>
                 {
                     if (board == null) return;
-                    TearDownSurfaces();
+                    FadeOutSurfaces();   // a video below fades out over the board
                     worker.Enqueue("board-clean", false, () => { Boards.CleanRenders(path); return true; }, null);
                     TrimSoon();
                 }, true, ShellApi.DWPOS_FILL);
