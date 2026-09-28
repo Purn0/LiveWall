@@ -50,29 +50,9 @@ namespace LiveWall
             for (int m = 0; m < monitors.Count; m++)
                 res.Covered[m] = UncoveredArea(monitors[m]) <= (long)(monitors[m].Width * (long)monitors[m].Height * UncoveredTolerance);
 
-            res.FullscreenApp = DetectFullscreen(monitors, false, out res.FullscreenMonitor);
-            return res;
-        }
-
-        // For the music (cheap: no window enumeration). A maximized window is not a fullscreen app, even when it covers
-        // the whole monitor because the taskbar auto-hides; games, F11 browsers and video players are not "maximized".
-        public static bool FullscreenAppRunning(IList<RECT> monitors, out string windowClass)
-        {
-            int m;
-            windowClass = Native.ClassName(Native.GetForegroundWindow());
-            if (ShellOverlays.Contains(windowClass)) return false;   // Alt+Tab, Task View, Start: not an app
-            return DetectFullscreen(monitors, true, out m);
-        }
-
-        static readonly HashSet<string> ShellOverlays = new HashSet<string>
-            { "XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "ForegroundStaging", "Windows.UI.Core.CoreWindow", "Shell_TrayWnd", "TaskListThumbnailWnd" };
-
-        static bool DetectFullscreen(IList<RECT> monitors, bool ignoreMaximized, out int monitor)
-        {
-            monitor = -1;
             // Fullscreen: the foreground window exactly covers its whole monitor (games, videos, F11 browsers)...
             IntPtr fg = Native.GetForegroundWindow();
-            if (fg != IntPtr.Zero && !IsShellWindow(fg) && !(ignoreMaximized && Native.IsZoomed(fg)))
+            if (fg != IntPtr.Zero && !IsShellWindow(fg))
             {
                 RECT wr;
                 if (Native.GetWindowRect(fg, out wr))
@@ -82,16 +62,86 @@ namespace LiveWall
                         RECT mr = monitors[m];
                         if (wr.Left <= mr.Left && wr.Top <= mr.Top && wr.Right >= mr.Right && wr.Bottom >= mr.Bottom)
                         {
-                            monitor = m;
-                            return true;
+                            res.FullscreenApp = true;
+                            res.FullscreenMonitor = m;
+                            break;
                         }
                     }
                 }
             }
             // ...or Windows itself reports exclusive fullscreen D3D / presentation mode.
             int quns;
-            return Native.SHQueryUserNotificationState(out quns) >= 0 &&
-                   (quns == Native.QUNS_RUNNING_D3D_FULL_SCREEN || quns == Native.QUNS_PRESENTATION_MODE);
+            if (!res.FullscreenApp && Native.SHQueryUserNotificationState(out quns) >= 0 &&
+                (quns == Native.QUNS_RUNNING_D3D_FULL_SCREEN || quns == Native.QUNS_PRESENTATION_MODE))
+                res.FullscreenApp = true;
+            return res;
+        }
+
+        // For the music (cheap: no window enumeration): the foreground window if it is an app shown fullscreen or
+        // maximized (or filling its screen's work area), else IntPtr.Zero. File Explorer, Settings and similar Windows
+        // tools, the shell (Start, Alt+Tab, taskbar, desktop) and LiveWall's own windows don't count.
+        // transient: the taskbar, Start, Alt+Tab and the like are in front for a moment; the caller keeps its last answer.
+        public static IntPtr AppInFront(out string what, out bool transient)
+        {
+            what = null;
+            IntPtr fg = Native.GetForegroundWindow();
+            transient = fg != IntPtr.Zero && ShellOverlays.Contains(Native.ClassName(fg));
+            if (fg == IntPtr.Zero || transient) return IntPtr.Zero;
+            IntPtr root = Native.GetAncestor(fg, Native.GA_ROOTOWNER);   // a dialog or popup of an app: the app decides
+            if (root != IntPtr.Zero && root != fg && Native.IsWindowVisible(root)) fg = root;
+            if (Native.IsIconic(fg) || IsShellWindow(fg)) return IntPtr.Zero;
+            bool maximized = Native.IsZoomed(fg), fills = false;
+            RECT wr;
+            if (!maximized && Native.GetWindowRect(fg, out wr))
+            {
+                var mi = new MONITORINFOEX();
+                mi.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(MONITORINFOEX));
+                if (Native.GetMonitorInfo(Native.MonitorFromWindow(fg, Native.MONITOR_DEFAULTTONEAREST), ref mi))
+                    fills = Covers(wr, mi.rcMonitor) || Covers(wr, mi.rcWork);
+            }
+            int quns;
+            bool exclusive = !maximized && !fills && Native.SHQueryUserNotificationState(out quns) >= 0 &&
+                             (quns == Native.QUNS_RUNNING_D3D_FULL_SCREEN || quns == Native.QUNS_PRESENTATION_MODE);
+            if (!maximized && !fills && !exclusive) return IntPtr.Zero;
+            string exe = AppProcessName(fg);
+            if (exe != null && WindowsTools.Contains(exe)) return IntPtr.Zero;
+            what = (maximized ? "maximized app" : "fullscreen app") + (exe != null ? " (" + exe + ")" : "");
+            return fg;
+        }
+
+        static bool Covers(RECT a, RECT b) { return a.Left <= b.Left && a.Top <= b.Top && a.Right >= b.Right && a.Bottom >= b.Bottom; }
+
+        static readonly HashSet<string> ShellOverlays = new HashSet<string>
+            { "XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "ForegroundStaging", "Windows.UI.Core.CoreWindow", "Shell_TrayWnd", "TaskListThumbnailWnd" };
+
+        // Not "an app" for the music: File Explorer, Settings and other Windows tools, shell hosts, LiveWall itself.
+        static readonly HashSet<string> WindowsTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "explorer", "SystemSettings", "Taskmgr", "mmc", "control", "rundll32", "regedit", "msconfig", "resmon", "perfmon",
+            "SecHealthUI", "dxdiag", "msinfo32", "SystemPropertiesAdvanced", "SystemPropertiesComputerName", "SystemPropertiesHardware",
+            "SystemPropertiesPerformance", "SystemPropertiesProtection", "SystemPropertiesRemote", "StartMenuExperienceHost",
+            "SearchHost", "ShellExperienceHost", "TextInputHost", "LockApp", "LiveWall"
+        };
+
+        static IntPtr nameCacheWindow;
+        static string nameCache;
+
+        // The process behind a window (for a Store app's frame window: the app inside it, e.g. SystemSettings).
+        static string AppProcessName(IntPtr hwnd)
+        {
+            if (hwnd == nameCacheWindow) return nameCache;
+            IntPtr target = hwnd;
+            if (Native.ClassName(hwnd) == "ApplicationFrameWindow")
+            {
+                IntPtr core = Native.FindWindowEx(hwnd, IntPtr.Zero, "Windows.UI.Core.CoreWindow", null);
+                if (core != IntPtr.Zero) target = core;
+            }
+            uint pid;
+            Native.GetWindowThreadProcessId(target, out pid);
+            string path = AudioMonitor.ProcessPath(pid);
+            nameCacheWindow = hwnd;
+            nameCache = path != null ? System.IO.Path.GetFileNameWithoutExtension(path) : null;
+            return nameCache;
         }
 
         IntPtr ignore;

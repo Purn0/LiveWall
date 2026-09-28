@@ -181,7 +181,7 @@ namespace LiveWall
             return pid == Native.GetCurrentProcessId() || string.Equals(ProcessPath(pid), AppPaths.ExePath, StringComparison.OrdinalIgnoreCase);
         }
 
-        static string ProcessPath(uint pid)
+        internal static string ProcessPath(uint pid)
         {
             IntPtr h = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
             if (h == IntPtr.Zero) return null;

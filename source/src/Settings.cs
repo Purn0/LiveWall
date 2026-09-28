@@ -63,12 +63,13 @@ namespace LiveWall
         public string Default = MusicSpec.None;
         public string Folder = "";                           // "" = the user's Music folder
         public int Volume = 50;                              // 0-100
-        public bool Muted;                                   // the user paused the music (tray Play/Pause)
+        public bool Muted;                                   // the user paused the music (shortcut, tray Play/Pause)
+        public string Hotkey = "Ctrl+Alt+M";                 // pause / play the music
         public bool SilenceForOtherAudio = true;
-        public bool PauseOnFullscreen = true;
+        public bool PauseOnFullscreen = true;                // a fullscreen or maximized app in front (not Explorer/Settings)
         public bool PauseOnBattery = false;
         public bool PauseOnEnergySaver = true;
-        public int GraceSeconds = 8;                         // silent this long: the music process ends
+        public int GraceSeconds = 8;                        // silent this long: the music process ends
         public int ResumeSeconds = 4;                        // other apps quiet this long: the music comes back
         public bool AskAi = false;                           // online mood tagging (off by default)
         public string AiKey = "";                            // DPAPI-protected, base64
@@ -198,6 +199,7 @@ namespace LiveWall
                         case "musicFolder": s.Music.Folder = v; break;
                         case "musicVolume": s.Music.Volume = Math.Max(0, Math.Min(100, ParseInt(v, 50))); break;
                         case "musicMuted": s.Music.Muted = v == "1"; break;
+                        case "musicHotkey": s.Music.Hotkey = v; break;
                         case "musicSilenceForOtherAudio": s.Music.SilenceForOtherAudio = v == "1"; break;
                         case "musicPauseOnFullscreen": s.Music.PauseOnFullscreen = v == "1"; break;
                         case "musicPauseOnBattery": s.Music.PauseOnBattery = v == "1"; break;
@@ -253,6 +255,7 @@ namespace LiveWall
             sb.AppendLine("musicFolder=" + m.Folder);
             sb.AppendLine("musicVolume=" + m.Volume.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("musicMuted=" + B(m.Muted));
+            sb.AppendLine("musicHotkey=" + m.Hotkey);
             sb.AppendLine("musicSilenceForOtherAudio=" + B(m.SilenceForOtherAudio));
             sb.AppendLine("musicPauseOnFullscreen=" + B(m.PauseOnFullscreen));
             sb.AppendLine("musicPauseOnBattery=" + B(m.PauseOnBattery));

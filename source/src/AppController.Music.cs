@@ -22,7 +22,8 @@ namespace LiveWall
     {
         static readonly IntPtr TimerMusicGrace = new IntPtr(30), TimerMusicMeter = new IntPtr(31), TimerMusicRetry = new IntPtr(32),
             TimerMusicCheck = new IntPtr(33);
-        static readonly TimeSpan FullscreenSettle = TimeSpan.FromMilliseconds(1500);
+        static readonly TimeSpan FullscreenSettle = TimeSpan.FromMilliseconds(1500);   // an app in front this long: fade out
+        static readonly TimeSpan FrontResumeDelay = TimeSpan.FromMilliseconds(2000);   // gone from the front this long: fade in
         const uint WM_AUDIO_NOTIFY = Native.WM_APP + 23;
         const float AudibleThreshold = 0.005f;                                   // peak (0-1); silent streams read exactly 0
         static readonly TimeSpan AudibleConfirm = TimeSpan.FromMilliseconds(600);   // audible this long before fading out
@@ -52,9 +53,18 @@ namespace LiveWall
         // The queue for the current source.
         string musicKey;
         List<string> musicQueue = new List<string>();
-        int musicIndex;
-        long musicPositionMs;                    // where musicQueue[musicIndex] continues
-        bool musicShuffle, musicLoopTrack;
+        int musicIndex;                          // last track taken from the queue
+        long musicPositionMs;                    // where CurrentTrack continues
+        bool musicShuffle, musicLoopSource;      // musicLoopSource: the video's own sound (always one looping track)
+        Func<List<string>> musicBuild;           // finds the current source's tracks again (null: nothing to look for)
+        bool musicRescanning;
+
+        // Many wallpapers in a slideshow: each wallpaper gets its own song (interval <= 15 min, repeated) or two
+        // (alternating); with one or two wallpapers, or on a board, the queue just plays on.
+        readonly List<string> musicSet = new List<string>();
+        int musicSetPos;
+        string musicSetFor;                      // the wallpaper the set was chosen for
+        string lastSetSong;                      // the song of the last set, when the source changed under it
         string musicReason = "";                 // why it is silent ("" = playing, or nothing to play)
         string musicBaseReason;                  // silent for a reason other than other apps' audio (null = none)
         bool musicReady;                         // this wallpaper has music and its tracks are known
@@ -70,10 +80,34 @@ namespace LiveWall
         bool audioMonitorFailed, otherAudible, meterRunning, meterSoon;
         DateTime audibleSince = DateTime.MinValue, lastAudibleAt = DateTime.MinValue, meterDue;
         string otherWho;
-        DateTime fullscreenSince = DateTime.MinValue;
-        string fullscreenClass;
+        // A fullscreen or maximized app in front.
+        DateTime frontSince = DateTime.MinValue, frontGoneSince = DateTime.MinValue;
+        IntPtr frontWindow, frontOverride;       // frontOverride: the user chose to play music over this window anyway
+        string frontWhat;
+        IntPtr frontHook;                        // location changes of the foreground window's thread (maximize/restore)
+        uint frontHookThread;
+        WinEventProc frontHookProc;
 
-        string CurrentTrack { get { return musicQueue.Count > 0 && musicIndex < musicQueue.Count ? musicQueue[musicIndex] : null; } }
+        string CurrentTrack
+        {
+            get
+            {
+                if (musicSet.Count > 0) return musicSet[Math.Min(musicSetPos, musicSet.Count - 1)];
+                return musicQueue.Count > 0 && musicIndex < musicQueue.Count ? musicQueue[musicIndex] : null;
+            }
+        }
+
+        bool LoopCurrent { get { return musicLoopSource || musicSet.Count == 1 || (musicSet.Count == 0 && musicQueue.Count == 1); } }
+
+        // 0 = the queue plays on; 1 = one repeating song per wallpaper; 2 = two alternating songs per wallpaper.
+        int SongsPerWallpaper
+        {
+            get
+            {
+                if (board != null || PlayableCount < 3) return 0;
+                return settings.IntervalMinutes > 0 && settings.IntervalMinutes <= 15 ? 1 : 2;
+            }
+        }
 
         // ================================================================== public surface for tray / settings
 
@@ -111,6 +145,8 @@ namespace LiveWall
         public string CurrentWallpaperMusic { get { return settings.Music.OverrideFor(MusicWallpaperKey); } }   // null = default
         public string MusicDefault { get { return settings.Music.Default; } }
 
+        public string MusicHotkey { get { return settings.Music.Hotkey; } }
+
         public void ToggleMusicMute()
         {
             settings.Music.Muted = !settings.Music.Muted;
@@ -120,10 +156,30 @@ namespace LiveWall
             UpdateStatus();
         }
 
+        // The music shortcut (and --music-toggle, e.g. a pinned "LiveWall Music" button): pause / play, with a note
+        // naming the song. Quiet only because of the app in front? Then play anyway while that window stays in front.
+        public void MusicButton()
+        {
+            if (!settings.Music.Muted && frontWindow != IntPtr.Zero && musicBaseReason != null && musicBaseReason.EndsWith("app in front"))
+            {
+                frontOverride = frontWindow;
+                Log.Info("Music: playing over " + frontWhat + " (user)");
+                UpdateMusic();
+                UpdateStatus();
+            }
+            else ToggleMusicMute();
+            string key = string.IsNullOrEmpty(settings.Music.Hotkey) ? "" : "   (" + settings.Music.Hotkey + ")";
+            if (settings.Music.Muted) Toast.Show("Music paused" + key);
+            else if (MusicPlaying) Toast.Show("\u266A  " + MusicTrackTitle + key);
+            else if (musicReason.Length > 0) Toast.Show("Music on - waiting: " + musicReason);
+            else Toast.Show("No music for this wallpaper (Settings > Music...)");
+        }
+
         public void NextTrack()
         {
             if (!CanSkipTrack) return;
             AdvanceQueue();
+            if (musicSet.Count > 0) TakeSet(musicSet.Count, false);   // this wallpaper's song(s): the next ones
             musicPositionMs = 0;
             musicErrors = 0;
             Log.Info("Music: next track");
@@ -195,6 +251,7 @@ namespace LiveWall
             if (m.AskAi != old.AskAi || m.AiKey != old.AiKey || m.AiModel != old.AiModel) moodAiTried.Clear();
             if (music != null && m.Volume != old.Volume) music.SetVolume(m.Volume);
             if (m.GraceSeconds != old.GraceSeconds && musicGraceRunning) { StopGrace(); }
+            if (m.Hotkey != old.Hotkey) RegisterHotkeys();
             Log.Info("Music settings applied (default " + MusicSpec.Describe(m.Default) + ", volume " + m.Volume + ")");
             UpdateMusic();
             UpdateStatus();
@@ -319,20 +376,33 @@ namespace LiveWall
             return null;
         }
 
-        void SelectSource(MusicWant want, List<string> tracks)
+        // Returns true when the queue was started afresh (a different source).
+        bool SelectSource(MusicWant want, List<string> tracks)
         {
-            if (want.Key == musicKey && musicQueue.Count > 0) return;   // same source as before: keep playing
+            if (want.Key == musicKey && musicQueue.Count > 0) return false;   // same source as before: keep playing
+            // Another source with the very same tracks (e.g. two moods without their own subfolders): the same queue goes on.
+            if (musicQueue.Count > 0 && tracks.Count == musicQueue.Count && want.Loop == musicLoopSource &&
+                new HashSet<string>(musicQueue, StringComparer.OrdinalIgnoreCase).SetEquals(tracks))
+            {
+                musicKey = want.Key;
+                musicBuild = want.Build;
+                return false;
+            }
+            if (musicSet.Count > 0) lastSetSong = CurrentTrack;
             musicKey = want.Key;
             musicShuffle = want.Shuffle;
+            musicLoopSource = want.Loop;
+            musicBuild = want.Build;
             musicQueue = new List<string>(tracks);
             if (musicShuffle) Shuffle(musicQueue, null);
             musicIndex = 0;
             musicPositionMs = 0;
             musicErrors = 0;
-            musicLoopTrack = want.Loop || musicQueue.Count == 1;
+            musicSet.Clear();   // (musicSetFor stays: the next wallpaper still gets a different song)
             foreach (string k in musicTracks.Keys.Where(k => !string.Equals(k, want.Key, StringComparison.OrdinalIgnoreCase)).ToList())
                 musicTracks.Remove(k);   // look at other folders again when they are chosen again
             Log.Info("Music source: " + want.Describe + " (" + musicQueue.Count + " track" + (musicQueue.Count == 1 ? "" : "s") + ")");
+            return true;
         }
 
         void AdvanceQueue()
@@ -342,6 +412,85 @@ namespace LiveWall
             if (musicIndex < musicQueue.Count) return;
             musicIndex = 0;
             if (musicShuffle && musicQueue.Count > 1) Shuffle(musicQueue, musicQueue[musicQueue.Count - 1]);
+            RescanSource();   // a full pass: pick up music added (or moved) since
+        }
+
+        // Each wallpaper of a slideshow gets its own song(s); see SongsPerWallpaper.
+        void ApplySongSet(bool freshQueue)
+        {
+            int n = musicLoopSource ? 0 : Math.Min(SongsPerWallpaper, musicQueue.Count);
+            string wall = MusicWallpaperKey;
+            if (n == 0)
+            {
+                if (musicSet.Count == 0) return;
+                int i = musicQueue.FindIndex(t => string.Equals(t, CurrentTrack, StringComparison.OrdinalIgnoreCase));
+                if (i >= 0) musicIndex = i;   // keep the song that is playing; the queue goes on from it
+                musicSet.Clear();
+                musicSetFor = null;
+                return;
+            }
+            if (musicSetFor == wall && musicSet.Count == n) return;
+            bool nextWallpaper = musicSetFor != null && musicSetFor != wall;
+            if (nextWallpaper)
+            {
+                string previous = musicSet.Count > 0 ? CurrentTrack : lastSetSong;
+                if (!freshQueue) AdvanceQueue();   // new song(s) for the new wallpaper...
+                if (musicQueue.Count > 1 && string.Equals(musicQueue[musicIndex], previous, StringComparison.OrdinalIgnoreCase))
+                    AdvanceQueue();                // ...never the one the last wallpaper had
+            }
+            TakeSet(n, !nextWallpaper);
+            musicSetFor = wall;
+            Log.Info("Music: " + (n == 1 ? "song for this wallpaper (repeats): " : "songs for this wallpaper: ") +
+                     string.Join(" / ", musicSet.Select(Path.GetFileNameWithoutExtension)));
+        }
+
+        // The set starts at the current queue position. keepPosition: if the song playing now is still the first one,
+        // it goes on from where it is.
+        void TakeSet(int n, bool keepPosition)
+        {
+            string before = CurrentTrack;
+            musicSet.Clear();
+            musicSet.Add(musicQueue[musicIndex]);
+            while (musicSet.Count < n) { AdvanceQueue(); if (musicQueue.Count == 0) break; musicSet.Add(musicQueue[musicIndex]); }
+            musicSetPos = 0;
+            if (!keepPosition || !string.Equals(before, musicSet[0], StringComparison.OrdinalIgnoreCase)) musicPositionMs = 0;
+        }
+
+        // Looks at the source's folders again (a file was missing, or a full pass is done) and merges the result.
+        void RescanSource()
+        {
+            if (musicBuild == null || musicRescanning) return;
+            musicRescanning = true;
+            string key = musicKey;
+            var build = musicBuild;
+            List<string> found = null;
+            worker.Enqueue("music-rescan:" + key, true, () => { found = build(); return true; }, ok =>
+            {
+                musicRescanning = false;
+                if (found == null || key != musicKey) return;
+                MergeTracks(found);
+                UpdateMusic();
+                UpdateStatus();
+            });
+        }
+
+        void MergeTracks(List<string> found)
+        {
+            var now = new HashSet<string>(found, StringComparer.OrdinalIgnoreCase);
+            var known = new HashSet<string>(musicQueue, StringComparer.OrdinalIgnoreCase);
+            string at = musicQueue.Count > 0 && musicIndex < musicQueue.Count ? musicQueue[musicIndex] : null;
+            int removed = musicQueue.RemoveAll(t => !now.Contains(t) && !string.Equals(t, at, StringComparison.OrdinalIgnoreCase));
+            var added = found.Where(t => !known.Contains(t)).ToList();
+            foreach (string t in added)
+            {
+                int after = Math.Max(0, musicQueue.FindIndex(x => string.Equals(x, at, StringComparison.OrdinalIgnoreCase))) + 1;
+                musicQueue.Insert(musicShuffle ? random.Next(after, musicQueue.Count + 1) : Math.Min(after, musicQueue.Count), t);
+            }
+            if (!musicShuffle && added.Count > 0) musicQueue.Sort(StringComparer.OrdinalIgnoreCase);   // keep a custom folder in order
+            musicIndex = Math.Max(0, musicQueue.FindIndex(x => string.Equals(x, at, StringComparison.OrdinalIgnoreCase)));
+            musicTracks[musicKey] = found;
+            if (found.Count > 0) musicFailed.Remove(musicKey);
+            if (removed > 0 || added.Count > 0) Log.Info("Music: folder changed, " + added.Count + " track(s) added, " + removed + " gone");
         }
 
         void Shuffle(List<string> list, string notFirst)
@@ -373,7 +522,8 @@ namespace LiveWall
             UpdateAudioMonitor(want != null && settings.Music.SilenceForOtherAudio);
             if (!settings.Music.SilenceForOtherAudio || audio == null) otherAudible = false;
 
-            if (musicReady) SelectSource(want, tracks);
+            if (musicReady) ApplySongSet(SelectSource(want, tracks));
+            UpdateFrontHook();
             if (reason == null && audio != null && !otherAudible && hostState != HostState.Playing) PrecheckOtherAudio();
             if (reason == null && otherAudible) reason = "another app is playing sound";
 
@@ -395,26 +545,76 @@ namespace LiveWall
             if (m.PauseOnBattery && power.OnBattery) return "on battery";
             if (m.PauseOnEnergySaver && power.SaverOn) return "Energy Saver";
             // (The drawing editor is LiveWall's own full-screen window: not a reason.)
-            if (m.PauseOnFullscreen && editor == null && FullscreenSettled()) return "fullscreen app";
+            if (m.PauseOnFullscreen && editor == null) return AppInFrontSettled();
             return null;
         }
 
-        // A fullscreen window must stay for a moment before playing music fades out (splash screens and other brief
-        // full-screen windows must not cause a dip); a one-shot timer looks again then.
-        bool FullscreenSettled()
+        // "maximized app in front" / "fullscreen app in front", or null. The window must stay in front for a moment
+        // before playing music fades out (Alt+Tab, splash screens: no dip); a one-shot timer looks again then.
+        string AppInFrontSettled()
         {
-            string cls;
-            if (!Occlusion.FullscreenAppRunning(EnumerateMonitors(), out cls)) { fullscreenSince = DateTime.MinValue; return false; }
-            DateTime now = DateTime.UtcNow;
-            if (fullscreenSince == DateTime.MinValue) fullscreenSince = now;
-            TimeSpan left = FullscreenSettle - (now - fullscreenSince);
-            if (left <= TimeSpan.Zero || hostState != HostState.Playing)
+            string what;
+            bool transient;
+            IntPtr fg = Occlusion.AppInFront(out what, out transient);
+            if (transient) fg = frontWindow;   // taskbar, Start, Alt+Tab: nothing changes (e.g. clicking a pinned "LiveWall Music")
+            else if (fg != IntPtr.Zero) frontGoneSince = DateTime.MinValue;
+            else if (frontWindow != IntPtr.Zero && frontWindow != frontOverride && hostState != HostState.Playing && Native.IsWindow(frontWindow))
             {
-                if (fullscreenClass != cls) { fullscreenClass = cls; Log.Info("Music: fullscreen window " + cls); }
-                return true;
+                // The app left the front: wait a moment before the music comes back (a quick look elsewhere: no fade in/out).
+                DateTime now = DateTime.UtcNow;
+                if (frontGoneSince == DateTime.MinValue) frontGoneSince = now;
+                TimeSpan wait = FrontResumeDelay - (now - frontGoneSince);
+                if (wait > TimeSpan.Zero)
+                {
+                    Native.SetTimer(window.Handle, TimerMusicCheck, (uint)wait.TotalMilliseconds + 20, IntPtr.Zero);
+                    fg = frontWindow;
+                }
+                else frontGoneSince = DateTime.MinValue;
             }
-            Native.SetTimer(window.Handle, TimerMusicCheck, (uint)left.TotalMilliseconds + 20, IntPtr.Zero);
-            return false;
+            if (fg != frontWindow)
+            {
+                frontWindow = fg;
+                frontSince = DateTime.UtcNow;
+                if (fg != IntPtr.Zero && fg != frontOverride) frontOverride = IntPtr.Zero;   // another app: the user's "play anyway" ends
+                if (fg != IntPtr.Zero && what != frontWhat) Log.Info("Music: " + what + " in front");
+                frontWhat = what;
+            }
+            if (fg != IntPtr.Zero && !Native.IsWindow(fg)) { frontWindow = fg = IntPtr.Zero; }
+            if (fg == IntPtr.Zero || fg == frontOverride) return null;
+            TimeSpan left = FullscreenSettle - (DateTime.UtcNow - frontSince);
+            if (left > TimeSpan.Zero && hostState == HostState.Playing)
+            {
+                Native.SetTimer(window.Handle, TimerMusicCheck, (uint)left.TotalMilliseconds + 20, IntPtr.Zero);
+                return null;
+            }
+            return frontWhat != null && frontWhat.StartsWith("maximized") ? "maximized app in front" : "fullscreen app in front";
+        }
+
+        // Maximize / restore of the window in front sends no foreground or minimize event: while the music watches for
+        // it, listen to that one window thread's location changes (a callback per move; nothing otherwise).
+        void UpdateFrontHook()
+        {
+            uint pid = 0, tid = 0;
+            if (MusicWatchesFullscreen)
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                if (fg != IntPtr.Zero) tid = Native.GetWindowThreadProcessId(fg, out pid);
+                if (pid == Native.GetCurrentProcessId()) tid = 0;
+            }
+            if (tid == frontHookThread) return;
+            if (frontHook != IntPtr.Zero) { Native.UnhookWinEvent(frontHook); frontHook = IntPtr.Zero; }
+            frontHookThread = 0;
+            if (tid == 0) return;
+            if (frontHookProc == null) frontHookProc = OnFrontWindowMoved;
+            frontHook = Native.SetWinEventHook(Native.EVENT_OBJECT_LOCATIONCHANGE, Native.EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero, frontHookProc,
+                                               pid, tid, Native.WINEVENT_OUTOFCONTEXT);
+            if (frontHook != IntPtr.Zero) frontHookThread = tid;
+        }
+
+        void OnFrontWindowMoved(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+        {
+            if (idObject != 0 || idChild != 0 || hwnd != Native.GetForegroundWindow()) return;   // carets, child windows
+            ScheduleEvaluate(300);   // after the move/resize settles
         }
 
         void PlayMusic()
@@ -447,7 +647,7 @@ namespace LiveWall
         void LoadTrack(string track, long positionMs, bool fadeIn)
         {
             hostTrack = track;
-            hostSeq = music.Load(track, positionMs, musicLoopTrack, fadeIn, true);
+            hostSeq = music.Load(track, positionMs, LoopCurrent, fadeIn, true);
             hostState = HostState.Playing;
             Log.Info("Music: " + (positionMs > 0 ? "resuming " : "playing ") + Path.GetFileName(track) +
                      (positionMs > 0 ? " at " + TimeSpan.FromMilliseconds(positionMs).ToString(@"m\:ss") : "") + (fadeIn ? " (fade in)" : ""));
@@ -544,7 +744,8 @@ namespace LiveWall
                     break;
                 case MusicHost.EVT_ENDED:
                     if (seq != hostSeq) break;
-                    AdvanceQueue();
+                    if (musicSet.Count > 0) musicSetPos = (musicSetPos + 1) % musicSet.Count;   // this wallpaper's song(s) again
+                    else AdvanceQueue();
                     musicPositionMs = 0;
                     if (hostState == HostState.Playing && musicReason.Length == 0 && CurrentTrack != null) LoadTrack(CurrentTrack, 0, false);
                     else { hostState = HostState.Paused; UpdateMusic(); }
@@ -563,8 +764,12 @@ namespace LiveWall
                         musicQueue.RemoveAt(i);
                         if (musicIndex > i || musicIndex >= musicQueue.Count) musicIndex = musicIndex > i ? musicIndex - 1 : 0;
                     }
+                    if (musicSet.RemoveAll(t => string.Equals(t, bad, StringComparison.OrdinalIgnoreCase)) > 0) { musicSet.Clear(); musicSetFor = null; }
                     musicPositionMs = 0;
-                    if (musicQueue.Count == 0 || ++musicErrors >= 5)
+                    // Moved or renamed since the folder was read: read it again (the file may be there under a new name).
+                    bool missing = data == unchecked((int)0x80070002) || data == unchecked((int)0x80070003);
+                    if (missing) RescanSource(); else musicErrors++;
+                    if (musicQueue.Count == 0 || musicErrors >= 5)
                     {
                         Log.Warn("Music: giving up on " + musicKey);
                         musicFailed.Add(musicKey);
@@ -737,13 +942,16 @@ namespace LiveWall
             return "music: " + (musicReason.Length > 0 ? "silent (" + musicReason + ")" : MusicPlaying ? "playing" : "off") +
                    " host=" + (music == null ? "-" : "pid " + music.ProcessId + " " + hostState) +
                    " track=" + (CurrentTrack == null ? "-" : Path.GetFileName(CurrentTrack) + " @" + TimeSpan.FromMilliseconds(musicPositionMs).ToString(@"m\:ss")) +
-                   " source=" + (musicKey ?? "-") + " otherAudible=" + otherAudible + " meter=" + meterRunning + " grace=" + musicGraceRunning +
-                   " | audio: " + (audio == null ? "not watching" : audio.Describe());
+                   " source=" + (musicKey ?? "-") + " songsPerWallpaper=" + SongsPerWallpaper + " set=" + musicSet.Count +
+                   " otherAudible=" + otherAudible + " meter=" + meterRunning + " grace=" + musicGraceRunning +
+                   " front=" + (frontWindow == IntPtr.Zero ? "-" : frontWhat + (frontWindow == frontOverride ? " (playing anyway)" : "")) +
+                   " frontHook=" + (frontHook != IntPtr.Zero) + " | audio: " + (audio == null ? "not watching" : audio.Describe());
         }
 
         void ShutdownMusic()
         {
             foreach (var id in new[] { TimerMusicGrace, TimerMusicMeter, TimerMusicRetry, TimerMusicCheck }) Native.KillTimer(window.Handle, id);
+            if (frontHook != IntPtr.Zero) { Native.UnhookWinEvent(frontHook); frontHook = IntPtr.Zero; }
             if (musicForm != null && !musicForm.IsDisposed) musicForm.Close();
             if (music != null) { music.Dispose(); music = null; }
             if (audio != null) { audio.Dispose(); audio = null; }

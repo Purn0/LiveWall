@@ -21,7 +21,7 @@ namespace LiveWall
     //    above the picture or video and below the icons. Video surfaces are placed directly below it (SurfaceAnchor).
     internal sealed partial class AppController
     {
-        const int HotkeyBoardId = 0x4C01, HotkeyDrawId = 0x4C02, HotkeyCollectionId = 0x4C03;
+        const int HotkeyBoardId = 0x4C01, HotkeyDrawId = 0x4C02, HotkeyCollectionId = 0x4C03, HotkeyMusicId = 0x4C04;
         static readonly IntPtr TimerBoardDay = new IntPtr(20);
 
         BoardKind? board;              // board shown instead of the wallpaper
@@ -48,6 +48,7 @@ namespace LiveWall
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
             Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
+            Hotkeys.Unregister(window.Handle, HotkeyMusicId);
             CloseEditor();
             if (inkLayer != null) { inkLayer.Dispose(); inkLayer = null; }
         }
@@ -58,11 +59,14 @@ namespace LiveWall
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
             Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
+            Hotkeys.Unregister(window.Handle, HotkeyMusicId);
             var failed = new List<string>();
             if (!Hotkeys.Register(window.Handle, HotkeyBoardId, settings.HotkeyBoard)) failed.Add(settings.HotkeyBoard);
             if (!Hotkeys.Register(window.Handle, HotkeyDrawId, settings.HotkeyDraw)) failed.Add(settings.HotkeyDraw);
             if (!Hotkeys.Register(window.Handle, HotkeyCollectionId, settings.HotkeyCollection)) failed.Add(settings.HotkeyCollection);
-            if (failed.Count == 0) Log.Info("Shortcuts registered: board " + settings.HotkeyBoard + ", draw " + settings.HotkeyDraw + ", collection " + settings.HotkeyCollection);
+            if (!Hotkeys.Register(window.Handle, HotkeyMusicId, settings.Music.Hotkey)) failed.Add(settings.Music.Hotkey);
+            if (failed.Count == 0) Log.Info("Shortcuts registered: board " + settings.HotkeyBoard + ", draw " + settings.HotkeyDraw + ", collection " +
+                                            settings.HotkeyCollection + ", music " + settings.Music.Hotkey);
             if (failed.Count > 0 && tray != null)
                 tray.ShowBalloon("Shortcut not available",
                     string.Join(" and ", failed) + (failed.Count == 1 ? " is" : " are") + " already used by another app. You can pick another in LiveWall Settings.", true);
@@ -78,6 +82,7 @@ namespace LiveWall
             Hotkeys.Unregister(window.Handle, HotkeyBoardId);
             Hotkeys.Unregister(window.Handle, HotkeyDrawId);
             Hotkeys.Unregister(window.Handle, HotkeyCollectionId);
+            Hotkeys.Unregister(window.Handle, HotkeyMusicId);
         }
 
         public void ResumeHotkeys()
@@ -92,6 +97,7 @@ namespace LiveWall
             if (id == HotkeyBoardId) ToggleBoard();
             else if (id == HotkeyDrawId) StartDrawing();
             else if (id == HotkeyCollectionId) NextCollection();
+            else if (id == HotkeyMusicId) MusicButton();
         }
 
         void ApplyInkSettings(Settings old, Settings s)

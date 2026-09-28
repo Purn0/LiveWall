@@ -121,7 +121,7 @@ namespace LiveWall
             var music = new MenuItem("Music");
             music.MenuItems.Add(new MenuItem(Shorten(app.MusicStatus, 60).Replace("&", "&&")) { Enabled = false });
             music.MenuItems.Add("-");
-            music.MenuItems.Add(new MenuItem(app.MusicMuted ? "Play" : "Pause", (s, e) => app.ToggleMusicMute()));
+            music.MenuItems.Add(new MenuItem((app.MusicMuted ? "Play" : "Pause") + ShortcutText(app.MusicHotkey), (s, e) => app.ToggleMusicMute()));
             music.MenuItems.Add(new MenuItem("Next track", (s, e) => app.NextTrack()) { Enabled = app.CanSkipTrack });
             var volume = new MenuItem("Volume");
             foreach (int v in new[] { 25, 50, 75, 100 })

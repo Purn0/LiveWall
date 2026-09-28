@@ -808,6 +808,7 @@ namespace LiveWall.Ink
 
         void ShowColorPicker(Rectangle near, bool below)
         {
+            if (colorPicker != null && colorPicker.Visible) { colorPicker.Hide(); return; }   // clicked again: close it
             if (colorPicker == null)
             {
                 colorPicker = new ColorPicker(dpiScale, recentColors);

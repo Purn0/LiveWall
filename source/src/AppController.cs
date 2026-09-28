@@ -163,6 +163,7 @@ namespace LiveWall
             settings.IntervalMinutes = minutes;
             settings.Save();
             ScheduleNextAdvance();
+            UpdateMusic();   // songs per wallpaper depend on the interval
         }
 
         public void ToggleShuffle()
@@ -826,6 +827,7 @@ namespace LiveWall
             else text = current.Name;
             if (userPaused) paused = true;
             if (tray != null) tray.SetStatus("LiveWall: " + text, MusicPlaying ? MusicTrackTitle : null, paused);
+            if (musicForm != null && !musicForm.IsDisposed) musicForm.RefreshNowPlaying();
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 string detail = board != null ? "Showing " + text.Substring(0, 1).ToLowerInvariant() + text.Substring(1) : current == null ? text
@@ -956,7 +958,7 @@ namespace LiveWall
                 case "debug-occlusion=hidden": debugOcclusion = "hidden"; Evaluate(); break;
                 case "debug-occlusion=auto": debugOcclusion = null; Evaluate(); break;
                 case "debug-new-day": SimulateNewDay(); break;
-                case "music-toggle": ToggleMusicMute(); break;
+                case "music-toggle": MusicButton(); break;
                 case "music-pause": if (!MusicMuted) ToggleMusicMute(); break;
                 case "music-play": if (MusicMuted) ToggleMusicMute(); break;
                 case "music-next": NextTrack(); break;

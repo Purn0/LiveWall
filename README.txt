@@ -58,9 +58,15 @@ Music
   cozy - put music in subfolders with those names; otherwise the whole folder plays), The video's own sound (the
   video wallpaper's soundtrack), or Custom files / a folder. Off (None) until you choose.
 - It fades out when another app plays sound (a video, a call, a game), when the PC is locked, the screen is off
-  or asleep, and (settings) during fullscreen apps, on battery or with Energy Saver. A few seconds later the music
-  player closes completely, so the sound card and the PC can go idle. When things are quiet again it comes back
-  from the same place with a fade-in. Changing to a wallpaper with other music fades over to it.
+  or asleep, and (settings) while a fullscreen or maximized app is in front (File Explorer, Settings and the desktop
+  don't count), on battery or with Energy Saver. A few seconds later the music player closes completely, so the
+  sound card and the PC can go idle. When things are quiet again it comes back from the same place with a fade-in.
+  Changing to a wallpaper with other music fades over to it.
+- Ctrl+Alt+M pauses / plays the music and shows the song's name (change it in the Music window). Quiet only because
+  of an app in front? Ctrl+Alt+M plays it anyway while that window stays in front. The Start menu also gets
+  "LiveWall Music" (same thing): pin it to the taskbar for a one-click music button.
+- With 3 or more wallpapers in a slideshow, each wallpaper gets its own song, repeated (changing every 15 minutes or
+  less) or two songs taking turns (longer). With one or two wallpapers, or on a board, the songs just play on.
 - Tray icon > Music: Play/Pause, Next track, Volume, "Silence while other apps play sound", For this wallpaper.
 - Optional: "Ask AI (Claude) for the mood" sends each wallpaper's picture once to Anthropic with your own API key
   (stored encrypted for your Windows account). Off by default; without it the mood comes from the colors.

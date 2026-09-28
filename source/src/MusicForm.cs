@@ -24,7 +24,9 @@ namespace LiveWall
         TextBox folderBox, keyBox;
         NumericUpDown volumeBox, graceBox, resumeBox;
         CheckBox otherBox, fullscreenBox, batteryBox, saverBox, aiBox;
-        Label defaultCustomLabel, wallpaperCustomLabel, moodLabel, statusLabel, keyLabel;
+        Label defaultCustomLabel, wallpaperCustomLabel, moodLabel, nowLabel, keyLabel;
+        Button playButton, nextButton;
+        HotkeyBox hotkeyBox;
 
         public MusicForm(AppController app, MusicSettings current)
         {
@@ -77,7 +79,7 @@ namespace LiveWall
 
             volumeBox = Number(0, 100);
             otherBox = Check("Silence while other apps play sound (resumes when they are quiet)");
-            fullscreenBox = Check("Silence while a fullscreen app or game is running");
+            fullscreenBox = Check("Silence while a fullscreen or maximized app is in front (not File Explorer, Settings or the desktop)");
             batteryBox = Check("Silence while running on battery");
             saverBox = Check("Silence while Energy Saver / Battery Saver is on");
             graceBox = Number(1, 600);
@@ -88,7 +90,14 @@ namespace LiveWall
             keyLabel = Note("");
             var forget = Small("Forget key", (s, e) => { baseline.AiKey = ""; keyBox.Text = ""; UpdateLabels(); });
 
-            statusLabel = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(0, 10, 0, 0), UseMnemonic = false };
+            nowLabel = new Label { AutoSize = true, UseMnemonic = false, MaximumSize = new Size(360, 0), Margin = new Padding(0, 7, 8, 3) };
+            playButton = Small("Pause", (s, e) => { app.ToggleMusicMute(); RefreshNowPlaying(); });
+            nextButton = Small("Next song", (s, e) => { app.NextTrack(); RefreshNowPlaying(); });
+            hotkeyBox = new HotkeyBox { Margin = new Padding(6, 3, 6, 3) };
+            // While the shortcut box has focus, the current shortcuts must not fire (so they can be typed in).
+            hotkeyBox.Enter += (s, e) => app.SuspendHotkeys();
+            hotkeyBox.Leave += (s, e) => app.ResumeHotkeys();
+            FormClosed += (s, e) => app.ResumeHotkeys();
             var ok = Small("OK", (s, e) => { Apply(); Close(); });
             var cancel = Small("Cancel", (s, e) => Close());
             var apply = Small("Apply", (s, e) => Apply());
@@ -98,7 +107,9 @@ namespace LiveWall
             buttons.Controls.AddRange(new Control[] { ok, cancel, apply });
 
             string name = app.MusicWallpaperName;
-            Add(root, Header("Sources", true));
+            Add(root, Header("Now playing", true));
+            Add(root, Line(nowLabel, playButton, nextButton));
+            Add(root, Header("Sources", false));
             Add(root, Line(Label("All wallpapers"), defaultBox, defaultFiles, defaultFolder));
             Add(root, defaultCustomLabel);
             Add(root, Line(Label(name == null ? "This wallpaper" : "This wallpaper (" + Shorten(name, 34) + ")"), wallpaperBox, wallpaperFiles, wallpaperFolder));
@@ -109,8 +120,10 @@ namespace LiveWall
             Add(root, Note("\"Random\" shuffles this folder. \"By theme\" plays its subfolder named after the wallpaper's mood - calm, " +
                            "energetic, dark, happy, dreamy or cozy - or the whole folder if there is none. \"The video's own sound\" plays the " +
                            "video wallpaper's soundtrack (the video itself stays muted)."));
+            Add(root, Note("With 3 or more wallpapers in a slideshow, each wallpaper gets its own song, repeated (changing every 15 minutes " +
+                           "or less), or two songs taking turns (longer). With one or two wallpapers, or on a board, the songs just play on."));
             Add(root, Header("Playback", false));
-            Add(root, Line(Label("Volume (%)"), volumeBox));
+            Add(root, Line(Label("Volume (%)"), volumeBox, Label("   Pause / play shortcut"), hotkeyBox));
             Add(root, otherBox);
             Add(root, fullscreenBox);
             Add(root, batteryBox);
@@ -124,7 +137,6 @@ namespace LiveWall
             Add(root, keyLabel);
             Add(root, Note("Sends each wallpaper's picture (small JPEG) once to api.anthropic.com using your key; the answer is kept. " +
                            "Without it, the mood comes from the picture's colors on this PC."));
-            Add(root, statusLabel);
             Add(root, buttons);
         }
 
@@ -149,8 +161,19 @@ namespace LiveWall
             aiBox.Checked = m.AskAi;
             string mood = app.CurrentWallpaperMood;
             moodLabel.Text = mood == null ? "" : "Mood of this wallpaper: " + mood.Replace(" ai", " (by AI)");
-            statusLabel.Text = app.MusicStatus;
+            hotkeyBox.Text = m.Hotkey;
+            RefreshNowPlaying();
             UpdateLabels();
+        }
+
+        // Also called by the app when the song or the state changes.
+        public void RefreshNowPlaying()
+        {
+            string title = app.MusicTrackTitle;
+            string text = app.MusicPlaying ? "\u266A  " + title : app.MusicStatus;
+            if (nowLabel.Text != text) nowLabel.Text = text;
+            playButton.Text = app.MusicMuted ? "Play" : "Pause";
+            nextButton.Enabled = app.CanSkipTrack;
         }
 
         void UpdateLabels()
@@ -206,6 +229,9 @@ namespace LiveWall
             m.ResumeSeconds = (int)resumeBox.Value;
             m.AskAi = aiBox.Checked;
             if (keyBox.Text.Trim().Length > 0) { m.AiKey = Dpapi.Protect(keyBox.Text.Trim()); baseline.AiKey = m.AiKey; keyBox.Text = ""; }
+            m.Hotkey = hotkeyBox.Text.Trim();
+            foreach (string other in new[] { app.BoardHotkey, app.DrawHotkey, app.CollectionHotkey })
+                if (m.Hotkey.Length > 0 && string.Equals(m.Hotkey, other, StringComparison.OrdinalIgnoreCase)) { m.Hotkey = ""; hotkeyBox.Text = ""; }
 
             string wk = Kind(wallpaperBox, WallpaperKinds);
             string spec = wk == MusicSpec.Default ? null : wk == MusicSpec.Custom ? wallpaperCustom : wk;
@@ -213,7 +239,7 @@ namespace LiveWall
             app.ApplyMusicSettings(m, wallpaperKey, changed, spec);
             if (changed) wallpaperSpecApplied = spec;
             UpdateLabels();
-            statusLabel.Text = app.MusicStatus;
+            RefreshNowPlaying();
         }
 
         // ------------------------------------------------------------------ small layout helpers

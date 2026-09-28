@@ -10,7 +10,7 @@ if (Test-Path $exe) {
 }
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'LiveWall' -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' -Name 'LiveWall' -ErrorAction SilentlyContinue
-foreach ($n in 'LiveWall.lnk', 'LiveWall Board.lnk', 'LiveWall Draw.lnk') {
+foreach ($n in 'LiveWall.lnk', 'LiveWall Board.lnk', 'LiveWall Draw.lnk', 'LiveWall Music.lnk') {
     Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) $n) -Force -ErrorAction SilentlyContinue
 }
 
