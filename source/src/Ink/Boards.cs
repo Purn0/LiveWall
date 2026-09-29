@@ -23,6 +23,25 @@ namespace LiveWall.Ink
         public static string PermanentPath { get { return Path.Combine(Dir, "permanent.lwink"); } }
         public static string RenderDir { get { return Path.Combine(AppPaths.LocalDir, "boards"); } }
 
+        // Boards with animated glow, as looping videos (named by content, so they are made once).
+        public static string AnimDir { get { return Path.Combine(RenderDir, "anim"); } }
+
+        // Keeps `keep` and the few made last (switching back and forth between boards doesn't encode again).
+        public static void CleanAnimations(string keep)
+        {
+            try
+            {
+                if (!Directory.Exists(AnimDir)) return;
+                var files = new DirectoryInfo(AnimDir).GetFiles().OrderByDescending(f => f.LastWriteTimeUtc).ToList();
+                for (int i = 0; i < files.Count; i++)
+                {
+                    if (i < 4 || string.Equals(files[i].FullName, keep, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { files[i].Delete(); } catch { }
+                }
+            }
+            catch (Exception ex) { Log.Warn("Cleaning board animations: " + ex.Message); }
+        }
+
         // Board pictures for the user: Pictures\LiveWall Boards\Board 2026-09-27.png, ...\Permanent board.png.
         public static string ExportDir
         {

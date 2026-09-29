@@ -31,6 +31,8 @@ namespace LiveWall
         InkEditor editor;
         InkLayer inkLayer;
         InkDocument currentInk;        // drawings on the current wallpaper (null when there are none)
+        string boardVideo;             // the board's glow animation playing as the wallpaper (null = the still picture)
+        string boardVideoFailed;       // an animation that would not play: the still picture stays
 
         void InitInk()
         {
@@ -104,6 +106,7 @@ namespace LiveWall
         {
             if (old.HotkeyBoard != s.HotkeyBoard || old.HotkeyDraw != s.HotkeyDraw || old.HotkeyCollection != s.HotkeyCollection) RegisterHotkeys();
             if (old.ShowWallpaperInk != s.ShowWallpaperInk) RefreshInkOverlays();
+            if (old.AnimateBoards != s.AnimateBoards && board != null && editor == null) RenderBoard();
             // A new default look applies right away to a board that has nothing on it yet.
             if (old.BoardStyle != s.BoardStyle && board != null && boardDoc != null && !boardDoc.Exists && editor == null)
             {
@@ -176,7 +179,9 @@ namespace LiveWall
             Native.KillTimer(window.Handle, TimerSlideshow);
             advanceDeferred = false;
             convertStatus = null;
-            currentVideo = null;   // the video (if any) keeps running underneath until the board image is on screen
+            // The video (if any) keeps running underneath until the board image is on screen; the same board's animation
+            // just goes on.
+            currentVideo = same && boardVideo != null ? boardVideo : null;
             RefreshInkOverlays();
             ScheduleBoardDay();
             if (!same || nativeCurrent == null || !nativeCurrent.StartsWith(Boards.RenderDir, StringComparison.OrdinalIgnoreCase)) RenderBoard();
@@ -207,6 +212,7 @@ namespace LiveWall
             if (editor != null && editor.IsBoard) CloseEditor();
             board = null;
             boardDoc = null;
+            boardVideo = null;
             boardFollowsToday = false;
             settings.BoardMode = "";
             settings.Save();
@@ -246,6 +252,7 @@ namespace LiveWall
             var date = boardDate;
             var layers = doc.Snapshot();
             string style = InkRenderer.NormalizeStyle(doc.Background);
+            bool animate = settings.AnimateBoards && InkGlow.AnyAnimated(layers);
             int cw = doc.CanvasWidth, ch = doc.CanvasHeight;
             Size sz = LargestMonitor();
             string header = Boards.Header(kind, date);
@@ -268,14 +275,68 @@ namespace LiveWall
             {
                 if (board == null || boardDoc != doc) return;
                 if (!ok) { TearDownSurfaces(); return; }
+                string anim = animate ? Path.Combine(Boards.AnimDir, "board-" + InkGlow.ContentKey(layers, style, sz.Width & ~1, sz.Height & ~1, header) + ".mp4") : null;
                 SetNative(path, set =>
                 {
-                    if (board == null) return;
-                    FadeOutSurfaces();   // a video below fades out over the board
+                    if (board == null || boardDoc != doc) return;
                     worker.Enqueue("board-clean", false, () => { Boards.CleanRenders(path); return true; }, null);
+                    if (anim != null && string.Equals(anim, boardVideo, StringComparison.OrdinalIgnoreCase) && surfaces.Count > 0)
+                    {
+                        currentVideo = boardVideo;   // the same animation: it goes on
+                        Evaluate();
+                        return;
+                    }
+                    FadeOutSurfaces();   // a video below (or the board's previous animation) fades out over the board
+                    boardVideo = null;
+                    currentVideo = null;
                     TrimSoon();
+                    if (anim == null || string.Equals(anim, boardVideoFailed, StringComparison.OrdinalIgnoreCase)) return;
+                    if (File.Exists(anim)) { StartBoardVideo(anim); return; }
+                    // Made once in the background (a few seconds); the still picture shows meanwhile.
+                    worker.EnqueueLatest("board-anim", () =>
+                    {
+                        bool made = InkGlow.RenderAnimation(style, layers, cw, ch, sz.Width, sz.Height, header, seed, anim);
+                        InkText.ClearCache();
+                        return made;
+                    }, made =>
+                    {
+                        if (board == null || boardDoc != doc) return;
+                        if (made) StartBoardVideo(anim);
+                        else { Log.Warn("Board animation could not be made; showing the still picture"); boardVideoFailed = anim; }
+                    });
                 }, true, ShellApi.DWPOS_FILL);
             });
+        }
+
+        // The board's glow animation fades in over its still picture (its first frame) and then plays, pauses and
+        // unloads like any video wallpaper; the still picture stays with Windows.
+        void StartBoardVideo(string video)
+        {
+            if (board == null) return;
+            Log.Info("Board animation: " + Path.GetFileName(video));
+            boardVideo = video;
+            currentVideo = video;
+            if (!host.IsValid && !host.Refresh())
+            {
+                ScheduleRebuild("desktop not ready", 1000);
+                return;
+            }
+            SyncSurfacesToMonitors();
+            foreach (var s in surfaces) { s.Asleep = false; StartNext(s, true); }
+            StartPolling(1000);
+            Evaluate();
+            worker.Enqueue("board-anim-clean", false, () => { Boards.CleanAnimations(video); return true; }, null);
+        }
+
+        // The animation would not play: back to the still picture (already Windows' wallpaper).
+        void StopBoardVideo(string why)
+        {
+            Log.Warn("Board animation stopped (" + why + "); showing the still picture");
+            boardVideoFailed = boardVideo;
+            boardVideo = null;
+            currentVideo = null;
+            TearDownSurfaces();
+            UpdateStatus();
         }
 
         void ScheduleBoardDay()

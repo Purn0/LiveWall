@@ -39,6 +39,9 @@ namespace LiveWall.Ink
         static int fillGap = 1;         // FillGaps index
         static string penBrush = InkBrush.Pen;
         static bool fillAllLayers;      // fill boundaries from every shown layer, not just the active one
+        static bool glowOn;             // new pen strokes, shapes and text glow (G)
+        static int glowStrength = 60, glowSpeed = 2;
+        static string glowAnim = InkGlow.Steady;
         static readonly Dictionary<string, string> lastLayer = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // board file -> layer
 
         const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
@@ -66,7 +69,7 @@ namespace LiveWall.Ink
         InkMapping map;
         float unit, dpiScale = 1;
         InkToolbar toolbar;
-        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem, penItem, layerItem;
+        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem, penItem, layerItem, glowItem;
         ColorPicker colorPicker;
         TextPanel textPanel;
 
@@ -570,7 +573,7 @@ namespace LiveWall.Ink
             InkPoint tail = live[live.Count - 1];
             if (Math.Abs(tail.X - lastRaw.X) + Math.Abs(tail.Y - lastRaw.Y) > 0.5f) live.Add(new InkPoint(lastRaw.X, lastRaw.Y, lastPressure));
 
-            var stroke = InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush);
+            var stroke = Glowing(InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush));
             live.Clear();
             AddToDoc(stroke);
             var action = new UndoAction();
@@ -728,7 +731,7 @@ namespace LiveWall.Ink
                 RenderRegion(preview);   // a click, not a shape
                 return;
             }
-            AddElement(InkStroke.Shape(NewId(), author, DateTime.UtcNow.Ticks, lastShape, color, penSize * unit, shapeStart, shapeEnd, ShapeFilled),
+            AddElement(Glowing(InkStroke.Shape(NewId(), author, DateTime.UtcNow.Ticks, lastShape, color, penSize * unit, shapeStart, shapeEnd, ShapeFilled)),
                        null, preview);
         }
 
@@ -952,8 +955,13 @@ namespace LiveWall.Ink
                 }
                 RenderRegion(preview);
             }
-            else AddElement(InkStroke.TextItem(NewId(), author, DateTime.UtcNow.Ticks, color, textSize * unit, textAt, text, textFont, textBold,
-                                               textItalic, textEffect, old != null ? old.Id : null), old, preview);
+            else
+            {
+                var item = InkStroke.TextItem(NewId(), author, DateTime.UtcNow.Ticks, color, textSize * unit, textAt, text, textFont, textBold,
+                                              textItalic, textEffect, old != null ? old.Id : null);
+                // Edited text keeps its glow unless glow is on now.
+                AddElement(glowOn || old == null ? Glowing(item) : item.WithGlow(old.Glow, old.Anim, old.Speed), old, preview);
+            }
             if (!closing) Activate();
             RefreshToolbar();
         }
@@ -1415,6 +1423,19 @@ namespace LiveWall.Ink
             items.Add(InkToolbar.Item.Button("\uE8D2", "T", "Text, emoji, kaomoji and symbols: click where they go; click text to change it (T)",
                 () => SetTool(EditorTool.Text), () => tool == EditorTool.Text));
             items.Add(InkToolbar.Item.Button("\uEF3C", "I", "Eyedropper: pick a color from the drawing (I)", UsePicker, () => tool == EditorTool.Picker));
+            InkToolbar.Item glow = null;
+            glow = InkToolbar.Item.Button("\uE706", "G", "Glow (G): pens, shapes and text shine. Click again: how bright, and steady, pulse, twinkle or flicker " +
+                "(boards play the animation as the wallpaper)",
+                () =>
+                {
+                    if (!glowOn) { SetGlow(true); toolbar.ShowFlyout(glow, BuildGlowFlyout()); }
+                    else if (toolbar.FlyoutOpen) toolbar.CloseFlyout();
+                    else toolbar.ShowFlyout(glow, BuildGlowFlyout());
+                },
+                () => glowOn);
+            glow.HasFlyout = true;
+            glowItem = glow;
+            items.Add(glow);
             items.Add(InkToolbar.Item.Separator());
             for (int i = 0; i < InkRenderer.Palette.Length; i++)
             {
@@ -1471,6 +1492,41 @@ namespace LiveWall.Ink
             selectShape = selectShape == SelectShape.Lasso ? SelectShape.Rectangle : SelectShape.Lasso;
             RefreshToolbar();
             if (toolbar != null && selectItem != null) toolbar.ShowMessage(selectItem, selectShape == SelectShape.Lasso ? "Select: lasso (draw around it)" : "Select: rectangle");
+        }
+
+        // ------------------------------------------------------------------ glow
+
+        // The editor's glow settings on a new pen stroke, shape or text.
+        InkStroke Glowing(InkStroke s)
+        {
+            return glowOn && InkGlow.Applies(s) ? s.WithGlow(glowStrength, glowAnim, glowAnim == InkGlow.Steady ? 0 : glowSpeed) : s;
+        }
+
+        void SetGlow(bool on)
+        {
+            glowOn = on;
+            RefreshToolbar();
+            if (toolbar != null && glowItem != null)
+                toolbar.ShowMessage(glowItem, on ? "Glow on: " + InkGlow.Title(glowAnim).ToLowerInvariant() + ", " + glowStrength + "%" : "Glow off");
+        }
+
+        List<InkToolbar.Item> BuildGlowFlyout()
+        {
+            var kinds = InkGlow.Kinds;
+            return new List<InkToolbar.Item>
+            {
+                InkToolbar.Item.Segment(new[] { "Off", "Steady", "Pulse", "Twinkle", "Flicker" },
+                    "Glow for what you draw next: off, steady, or animated (on a board it plays as the wallpaper)",
+                    () => glowOn ? Array.IndexOf(kinds, glowAnim) + 1 : 0,
+                    i => { glowOn = i > 0; if (i > 0) glowAnim = kinds[i - 1]; RefreshToolbar(); }),
+                InkToolbar.Item.Separator(),
+                InkToolbar.Item.Slider("How bright the glow is (" + glowStrength + "%)", () => (glowStrength - 10) / 90f,
+                    v => { glowStrength = 10 + (int)Math.Round(v * 90); RefreshToolbar(); },
+                    () => (6 + glowStrength * 0.18f) * dpiScale, () => glowOn),
+                InkToolbar.Item.Separator(),
+                InkToolbar.Item.Segment(new[] { "Slow", "Medium", "Fast" }, "How fast it pulses, twinkles or flickers",
+                    () => glowSpeed - 1, i => { glowSpeed = i + 1; RefreshToolbar(); })
+            };
         }
 
         List<InkToolbar.Item> BuildBrushFlyout()
@@ -1652,6 +1708,7 @@ namespace LiveWall.Ink
                 case Keys.F: SetTool(EditorTool.Fill); return true;
                 case Keys.T: SetTool(EditorTool.Text); return true;
                 case Keys.I: UsePicker(); return true;
+                case Keys.G: SetGlow(!glowOn); return true;
                 case Keys.OemOpenBrackets: CurrentSize = CurrentSize * 0.8f; return true;
                 case Keys.OemCloseBrackets: CurrentSize = CurrentSize * 1.25f; return true;
                 case Keys.Delete: if (floating != null) DeleteSelection(); else ClearAll(); return true;

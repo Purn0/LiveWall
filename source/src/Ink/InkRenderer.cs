@@ -87,11 +87,15 @@ namespace LiveWall.Ink
             return tool == InkTool.Highlighter ? Color.FromArgb(HighlighterAlpha, c.R, c.G, c.B) : Color.FromArgb(255, c.R, c.G, c.B);
         }
 
+        // Animated boards (their picture and every video frame) blend without gamma correction: several times faster,
+        // and the same in both, so the picture Windows shows while the video sleeps is exactly its first frame.
+        [ThreadStatic] public static bool Linear;
+
         public static void Prepare(Graphics g)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.CompositingQuality = CompositingQuality.HighQuality;
+            g.CompositingQuality = Linear ? CompositingQuality.AssumeLinear : CompositingQuality.HighQuality;
         }
 
         // ------------------------------------------------------------------ strokes
@@ -108,6 +112,16 @@ namespace LiveWall.Ink
         public static void DrawStroke(Graphics g, InkStroke s, InkMapping m, bool opaque = false, bool solid = false)
         {
             if (s.Points.Length == 0) return;
+            if (s.Glow > 0 && !solid)
+            {
+                InkGlow.Draw(g, s, m, (gg, mm) => DrawElement(gg, s, mm, opaque));
+                return;
+            }
+            DrawElement(g, s, m, opaque, solid);
+        }
+
+        static void DrawElement(Graphics g, InkStroke s, InkMapping m, bool opaque, bool solid = false)
+        {
             if (s.Tool == InkTool.Pen && InkBrush.IsBrush(s.Brush))
             {
                 InkBrush.Draw(g, s.Brush, s.Argb, s.Width, s.Points, s.Points.Length, InkBrush.Seed(s.Id), m, RectangleF.Empty, solid);
@@ -399,6 +413,10 @@ namespace LiveWall.Ink
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
+                bool linear = Linear;
+                Linear = InkGlow.AnyAnimated(layers);
+                try
+                {
                 using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
                 {
                     using (var g = Graphics.FromImage(bmp))
@@ -406,14 +424,21 @@ namespace LiveWall.Ink
                         Prepare(g);
                         var m = InkMapping.Fill(canvasW, canvasH, w, h);
                         DrawBackground(g, style, new Rectangle(0, 0, w, h), m, header, seed);
-                        // The ink on its own layer(s), so the eraser clears ink and not the board.
-                        DrawLayers(g, layers, m, w, h);
+                        // The ink on its own layer(s), so the eraser clears ink and not the board. Glows as at the start of
+                        // their animation: the picture is the video's first frame.
+                        bool timed = InkGlow.Timed;
+                        InkGlow.Timed = true;
+                        InkGlow.Time = 0;
+                        try { DrawLayers(g, layers, m, w, h); }
+                        finally { InkGlow.Timed = timed; }
                     }
                     string tmp = path + ".part";
                     bmp.Save(tmp, ImageFormat.Png);
                     if (File.Exists(path)) File.Delete(path);
                     File.Move(tmp, path);
                 }
+                }
+                finally { Linear = linear; }
                 return true;
             }
             catch (Exception ex) { Log.Error("Could not render board", ex); return false; }
@@ -421,19 +446,31 @@ namespace LiveWall.Ink
 
         // Layers bottom to top onto `g` (a w x h target): each drawn on a clear bitmap (erasers clear only their own layer),
         // then laid over with its opacity. One scratch bitmap, however many layers.
-        public static void DrawLayers(Graphics g, List<KeyValuePair<InkLayerInfo, List<InkStroke>>> layers, InkMapping m, int w, int h)
+        // `clip` (empty = all): only that area is drawn.
+        public static void DrawLayers(Graphics g, List<KeyValuePair<InkLayerInfo, List<InkStroke>>> layers, InkMapping m, int w, int h,
+                                      Rectangle clip = default(Rectangle))
         {
             if (layers.Count == 0) return;
-            using (var scratch = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+            Rectangle area = clip.IsEmpty ? new Rectangle(0, 0, w, h) : clip;
+            // The scratch bitmap covers just the area; strokes are moved into it.
+            using (var scratch = new Bitmap(area.Width, area.Height, PixelFormat.Format32bppPArgb))
                 foreach (var kv in layers)
                 {
                     using (var gs = Graphics.FromImage(scratch))
                     {
                         gs.Clear(Color.Transparent);
                         Prepare(gs);
+                        gs.TranslateTransform(-area.X, -area.Y);
                         DrawStrokes(gs, kv.Value, m);
                     }
-                    DrawWithOpacity(g, scratch, new Rectangle(0, 0, w, h), kv.Key.Opacity);
+                    if (area.X == 0 && area.Y == 0) DrawWithOpacity(g, scratch, new Rectangle(0, 0, area.Width, area.Height), kv.Key.Opacity);
+                    else
+                    {
+                        var state = g.Save();
+                        g.TranslateTransform(area.X, area.Y);
+                        DrawWithOpacity(g, scratch, new Rectangle(0, 0, area.Width, area.Height), kv.Key.Opacity);
+                        g.Restore(state);
+                    }
                 }
         }
 

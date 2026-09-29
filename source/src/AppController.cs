@@ -526,12 +526,13 @@ namespace LiveWall
             {
                 // The new window goes on top, fully transparent, and is made opaque at its first frame.
                 s.NextPlayer = new VideoPlayer(window.Handle, host.Parent, host.ScreenToParent(s.Bounds),
-                    SurfaceAnchor, true, currentVideo, settings.Fit, play, OnHostExited);
+                    SurfaceAnchor, true, currentVideo, VideoFit, play, OnHostExited);
             }
             catch (Exception ex)
             {
                 Log.Error("Could not start the video player", ex);
                 DisposeNext(s);
+                if (board != null) { ui.Post(_ => { if (board != null && boardVideo != null) StopBoardVideo("player could not start"); }, null); return; }
                 var failed = current;
                 if (failed != null) ui.Post(_ => MarkFailed(failed, "The video player could not be started (" + ex.Message + ")."), null);
             }
@@ -633,12 +634,15 @@ namespace LiveWall
             return new Size(w, h);
         }
 
+        // A board's animation fills the screen like the board's picture; wallpapers follow the scaling setting.
+        FitMode VideoFit { get { return board != null ? FitMode.Fill : settings.Fit; } }
+
         void ApplyFitEverywhere()
         {
             foreach (var s in surfaces)
             {
-                if (s.Player != null) s.Player.ApplyFit(settings.Fit, s.Bounds.Width, s.Bounds.Height);
-                if (s.NextPlayer != null) s.NextPlayer.ApplyFit(settings.Fit, s.Bounds.Width, s.Bounds.Height);
+                if (s.Player != null) s.Player.ApplyFit(VideoFit, s.Bounds.Width, s.Bounds.Height);
+                if (s.NextPlayer != null) s.NextPlayer.ApplyFit(VideoFit, s.Bounds.Width, s.Bounds.Height);
             }
             if (nativeCurrent != null) SetNative(nativeCurrent, null, true, board != null ? ShellApi.DWPOS_FILL : -1);
         }
@@ -715,6 +719,8 @@ namespace LiveWall
 
         bool CanSleep()
         {
+            // A board's animation: Windows shows the board's picture, which is its first frame.
+            if (board != null) return nativeCurrent != null && nativeCurrent.StartsWith(Boards.RenderDir, StringComparison.OrdinalIgnoreCase);
             // Unloading is only invisible when Windows shows the matching first frame underneath.
             return settings.SyncWindowsWallpaper && current != null && nativeCurrent != null &&
                    string.Equals(nativeCurrent, SnapshotFor(current), StringComparison.OrdinalIgnoreCase);
@@ -1104,6 +1110,7 @@ namespace LiveWall
                 Log.Warn("Video player process " + p.ProcessId + " ended unexpectedly");
                 p.Dispose();
                 if (deviceRetries++ < 3) Native.SetTimer(window.Handle, TimerRetry, 1500, IntPtr.Zero);
+                else if (board != null) { if (boardVideo != null) StopBoardVideo("the player keeps stopping"); }
                 else if (current != null) MarkFailed(current, "The video player keeps stopping.");
             }
         }
@@ -1135,6 +1142,11 @@ namespace LiveWall
                 Native.SetTimer(window.Handle, TimerRetry, 1500, IntPtr.Zero);
                 return;
             }
+            if (board != null)
+            {
+                if (boardVideo != null && string.Equals(p.Path, boardVideo, StringComparison.OrdinalIgnoreCase)) StopBoardVideo(p.ErrorText ?? "playback failed");
+                return;
+            }
             if (current == null || !string.Equals(p.Path, currentVideo, StringComparison.OrdinalIgnoreCase)) return;
             string reason = p.ErrorText ?? "Playback failed.";
             if (hr == unchecked((int)0xC00D5212) || hr == unchecked((int)0xC00D36C4))
@@ -1144,7 +1156,17 @@ namespace LiveWall
 
         void RetryVideo()
         {
-            if (current == null || currentVideo == null) return;
+            if (currentVideo == null) return;
+            if (board != null)
+            {
+                Log.Info("Recreating the board animation's players (attempt " + deviceRetries + ")");
+                string anim = currentVideo;
+                TearDownSurfaces();
+                host.Refresh();
+                StartBoardVideo(anim);
+                return;
+            }
+            if (current == null) return;
             Log.Info("Recreating video players (attempt " + deviceRetries + ")");
             string video = currentVideo;
             var item = current;
@@ -1173,7 +1195,7 @@ namespace LiveWall
             }
             rebuildAttempts = 0;
             if (current != null && currentVideo == null && board == null) { RefreshInkOverlays(); return; }   // picture: redo its drawings
-            if (current == null || currentVideo == null) return;
+            if (currentVideo == null || (current == null && board == null)) return;
 
             // Only start over when something actually changed: Explorer's desktop window, the screens, or our windows.
             bool sameHost = host.Progman == oldProgman && host.Parent == oldParent;
@@ -1200,7 +1222,8 @@ namespace LiveWall
             var item = current;
             TearDownSurfaces();
             RefreshInkOverlays();
-            ShowVideo(item, video, false);
+            if (board != null) StartBoardVideo(video);
+            else ShowVideo(item, video, false);
         }
 
         void Shutdown()

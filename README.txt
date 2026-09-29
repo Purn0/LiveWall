@@ -53,6 +53,13 @@ Boards and drawing
   in other apps (a screenshot, a browser's "Copy image", Paint, Photos) and picture files copied in File Explorer
   (PNG, JPEG, GIF, BMP, TIFF, and WebP/HEIC/AVIF when Windows can open them). Enter, Esc or clicking outside puts
   it down; Ctrl+Z before that puts it back.
+- Glow: the sun button (or G) makes what you draw next shine: pens (any brush), shapes and text get a soft halo
+  in their color and a brighter core. Click it again for how bright, and Steady, Pulse, Twinkle or Flicker at Slow,
+  Medium or Fast (each star twinkles at its own moment). On a board, animated glow plays as the wallpaper: the
+  board becomes a short seamless looping video (made in the background in a few seconds), played and paused like a
+  video wallpaper, with the still board shown meanwhile and whenever it is paused. Settings > Boards & drawing can
+  turn board animations off; boards without animations stay a still picture that costs nothing. Drawings on
+  wallpapers glow too, without the animation.
 - Layers (boards): the layer button on the toolbar shows the layer you draw on; click it for the Layers panel: up to
   8 layers, each with an eye (show / hide) and a lock, New, Delete, Up, Down, Rename (or double-click a name, F2) and
   the opacity of the layer you draw on. Drawing, erasing, selecting, pasting and filling act on that layer only; the

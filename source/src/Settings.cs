@@ -126,6 +126,7 @@ namespace LiveWall
         public string HotkeyBoard = "Ctrl+Alt+B";            // show today's board and draw on it / back to the wallpaper
         public string HotkeyDraw = "Ctrl+Alt+D";             // draw on whatever is shown (board or wallpaper)
         public bool ShowWallpaperInk = true;                 // show drawings made on wallpapers
+        public bool AnimateBoards = true;                    // boards with animated glow play as a looping video
         public string BoardStyle = "whiteboard";             // background of new boards
         public string BoardMode = "";                        // "", "daily", "daily:yyyy-MM-dd" or "permanent": board shown instead of the wallpaper
         public string LastBoard = "daily";                   // "daily" or "permanent": what the board shortcut shows
@@ -194,6 +195,7 @@ namespace LiveWall
                         case "hotkeyBoard": s.HotkeyBoard = v; break;
                         case "hotkeyDraw": s.HotkeyDraw = v; break;
                         case "showWallpaperInk": s.ShowWallpaperInk = v == "1"; break;
+                        case "animateBoards": s.AnimateBoards = v == "1"; break;
                         case "boardStyle": s.BoardStyle = v; break;
                         case "boardMode": s.BoardMode = v; break;
                         case "userId": s.UserId = v; break;
@@ -257,6 +259,7 @@ namespace LiveWall
             sb.AppendLine("hotkeyBoard=" + HotkeyBoard);
             sb.AppendLine("hotkeyDraw=" + HotkeyDraw);
             sb.AppendLine("showWallpaperInk=" + B(ShowWallpaperInk));
+            sb.AppendLine("animateBoards=" + B(AnimateBoards));
             sb.AppendLine("boardStyle=" + BoardStyle);
             sb.AppendLine("boardMode=" + BoardMode);
             sb.AppendLine("userId=" + UserId);

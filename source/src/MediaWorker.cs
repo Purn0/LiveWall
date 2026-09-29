@@ -257,6 +257,106 @@ namespace LiveWall
             }
         }
 
+        // Encodes `count` frames drawn by `draw` (frame index, the w x h canvas; the canvas keeps the previous frame, so
+        // `draw` may repaint only what changed) as an H.264 MP4 at `fps`: the board animation loop. Hardware encoder
+        // first, software if that fails; written to a .part file and moved into place when complete.
+        public static bool EncodeFrames(string outPath, int w, int h, int fps, int count, Action<int, Bitmap> draw)
+        {
+            var sw = Stopwatch.StartNew();
+            string tmp = Path.Combine(Path.GetDirectoryName(outPath), Path.GetFileNameWithoutExtension(outPath) + ".part.mp4");
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath));
+            bool ok;
+            try { ok = WriteFrames(tmp, w, h, fps, count, draw, true); }
+            catch (Exception ex) { Log.Warn("Hardware encode failed (" + ex.Message + "), retrying in software"); ok = false; }
+            if (!ok)
+            {
+                TryDelete(tmp);
+                try { ok = WriteFrames(tmp, w, h, fps, count, draw, false); }
+                catch (Exception ex) { Log.Warn("Encoding failed: " + ex.Message); ok = false; }
+            }
+            if (!ok) { TryDelete(tmp); return false; }
+            TryDelete(outPath);
+            File.Move(tmp, outPath);
+            Log.Info(string.Format("Encoded {0} ({1}x{2}, {3} frames, {4:N0} KB) in {5} ms", Path.GetFileName(outPath), w, h, count, new FileInfo(outPath).Length / 1024, sw.ElapsedMilliseconds));
+            return true;
+        }
+
+        static bool WriteFrames(string outPath, int w, int h, int fps, int count, Action<int, Bitmap> draw, bool hardware)
+        {
+            long frameDuration = 10000000L / fps;
+            uint bitrate = (uint)Math.Max(1500000, Math.Min(16000000, w * (double)h * fps * 0.06));
+            IMFAttributes attrs = null; IMFSinkWriter writer = null; IMFMediaType outType = null, inType = null;
+            try
+            {
+                MF.Check(MF.MFCreateAttributes(out attrs, 1), "MFCreateAttributes");
+                if (hardware) attrs.SetU32(MF.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
+                MF.Check(MF.MFCreateSinkWriterFromURL(outPath, IntPtr.Zero, attrs, out writer), "MFCreateSinkWriterFromURL");
+
+                MF.Check(MF.MFCreateMediaType(out outType), "MFCreateMediaType");
+                var o = (IMFAttributes)outType;
+                o.SetGuid(MF.MF_MT_MAJOR_TYPE, MF.MFMediaType_Video);
+                o.SetGuid(MF.MF_MT_SUBTYPE, MF.MFVideoFormat_H264);
+                o.SetU32(MF.MF_MT_AVG_BITRATE, bitrate);
+                o.SetU32(MF.MF_MT_INTERLACE_MODE, MF.MFVideoInterlace_Progressive);
+                o.SetU64(MF.MF_MT_FRAME_SIZE, MF.Pack((uint)w, (uint)h));
+                o.SetU64(MF.MF_MT_FRAME_RATE, MF.Pack((uint)fps, 1));
+                o.SetU64(MF.MF_MT_PIXEL_ASPECT_RATIO, MF.Pack(1, 1));
+                o.SetU32(MF.MF_MT_MPEG2_PROFILE, MF.eAVEncH264VProfile_High);
+                uint stream;
+                MF.Check(writer.AddStream(outType, out stream), "AddStream");
+
+                MF.Check(MF.MFCreateMediaType(out inType), "MFCreateMediaType");
+                var i = (IMFAttributes)inType;
+                i.SetGuid(MF.MF_MT_MAJOR_TYPE, MF.MFMediaType_Video);
+                i.SetGuid(MF.MF_MT_SUBTYPE, MF.MFVideoFormat_RGB32);
+                i.SetU32(MF.MF_MT_INTERLACE_MODE, MF.MFVideoInterlace_Progressive);
+                i.SetU64(MF.MF_MT_FRAME_SIZE, MF.Pack((uint)w, (uint)h));
+                i.SetU64(MF.MF_MT_FRAME_RATE, MF.Pack((uint)fps, 1));
+                i.SetU64(MF.MF_MT_PIXEL_ASPECT_RATIO, MF.Pack(1, 1));
+                i.SetU32(MF.MF_MT_DEFAULT_STRIDE, (uint)(w * 4));   // top-down rows
+                MF.Check(writer.SetInputMediaType(stream, inType, null), "SetInputMediaType");
+                MF.Check(writer.BeginWriting(), "BeginWriting");
+
+                int frameBytes = w * h * 4;
+                using (var canvas = new Bitmap(w, h, PixelFormat.Format32bppRgb))
+                {
+                    for (int f = 0; f < count; f++)
+                    {
+                        draw(f, canvas);
+                        IMFMediaBuffer buffer;
+                        MF.Check(MF.MFCreateMemoryBuffer((uint)frameBytes, out buffer), "MFCreateMemoryBuffer");
+                        try
+                        {
+                            IntPtr dst; uint max, cur;
+                            MF.Check(buffer.Lock(out dst, out max, out cur), "Lock");
+                            var bits = canvas.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+                            for (int y = 0; y < h; y++) CopyMemory(dst + y * w * 4, bits.Scan0 + y * bits.Stride, (UIntPtr)(uint)(w * 4));
+                            canvas.UnlockBits(bits);
+                            buffer.Unlock();
+                            buffer.SetCurrentLength((uint)frameBytes);
+                            IMFSample sample;
+                            MF.Check(MF.MFCreateSample(out sample), "MFCreateSample");
+                            try
+                            {
+                                sample.AddBuffer(buffer);
+                                sample.SetSampleTime(f * frameDuration);
+                                sample.SetSampleDuration(frameDuration);
+                                MF.Check(writer.WriteSample(stream, sample), "WriteSample");
+                            }
+                            finally { MF.Release(sample); }
+                        }
+                        finally { MF.Release(buffer); }
+                    }
+                }
+                MF.Check(writer.DoFinalize(), "Finalize");
+                return true;
+            }
+            finally
+            {
+                MF.Release(inType); MF.Release(outType); MF.Release(writer); MF.Release(attrs);
+            }
+        }
+
         // Pixel art is made of flat runs of identical pixels; dithered photos/video captures are not.
         static bool LooksLikePixelArt(Image img)
         {

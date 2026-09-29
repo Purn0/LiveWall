@@ -43,7 +43,7 @@ namespace LiveWall
         // Boards & drawing
         HotkeyBox boardKeyBox, drawKeyBox;
         ComboBox boardStyleBox;
-        CheckBox inkBox;
+        CheckBox inkBox, animateBox;
         Button removeInkButton;
         // Music
         Label nowLabel, moodLabel, defaultCustomLabel, currentCustomLabel, keyLabel, volumeLabel;
@@ -244,6 +244,7 @@ namespace LiveWall
             boardStyleBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Margin = new Padding(6, 3, 12, 3) };
             foreach (string st in InkRenderer.Styles) boardStyleBox.Items.Add(InkRenderer.StyleName(st));
             inkBox = Check("Show my drawings on wallpapers");
+            animateBox = Check("Play glowing animations on boards (twinkle, pulse, flicker)");
             var today = MakeButton("Open today's board", (s, e) => app.ShowBoard(BoardKind.Daily, DateTime.Today, false));
             var permanent = MakeButton("Open permanent board", (s, e) => app.ShowBoard(BoardKind.Permanent, DateTime.Today, false));
             removeInkButton = MakeButton("Remove drawings from current wallpaper", (s, e) => { app.ClearWallpaperInk(); removeInkButton.Enabled = app.CurrentWallpaperHasInk; });
@@ -253,11 +254,14 @@ namespace LiveWall
             AddRow(t, Line(Label("Board shortcut"), boardKeyBox, Label("   Draw shortcut"), drawKeyBox), false);
             AddRow(t, Line(Label("New boards look like"), boardStyleBox), false);
             AddRow(t, inkBox, false);
+            AddRow(t, animateBox, false);
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 8, 0, 0), MaximumSize = new Size(600, 0) };
             buttons.Controls.AddRange(new Control[] { today, permanent, removeInkButton, folder });
             AddRow(t, buttons, false);
             AddRow(t, Note("Drawing keys: P pen, H highlighter, E eraser, V select, L / A / R / O line, arrow, rectangle, ellipse, F fill, T text, " +
-                           "I eyedropper, 1-9 colors, [ ] size, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save a copy, Esc done."), false);
+                           "I eyedropper, G glow, 1-9 colors, [ ] size, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save a copy, Esc done."), false);
+            AddRow(t, Note("Glow (G while drawing) makes pens, shapes and text shine; animated glow turns a board into a short looping " +
+                           "video, played and paused like a video wallpaper. Without animations a board is a still picture and costs nothing."), false);
             AddRow(t, Note("The board shortcut shows the board you used last (today's or the permanent one) as the wallpaper and hides it again; " +
                            "a fresh daily board every day, earlier days are kept. The draw shortcut opens drawing on the board or wallpaper. Boards " +
                            "are also saved as pictures in Pictures\\LiveWall Boards. To change a shortcut, click its box and press the new keys " +
@@ -474,6 +478,7 @@ namespace LiveWall
             int si = Array.IndexOf(InkRenderer.Styles, s.BoardStyle);
             boardStyleBox.SelectedIndex = si < 0 ? 0 : si;
             inkBox.Checked = s.ShowWallpaperInk;
+            animateBox.Checked = s.AnimateBoards;
             removeInkButton.Enabled = app.CurrentWallpaperHasInk;
 
             var m = s.Music;
@@ -527,6 +532,7 @@ namespace LiveWall
             s.HotkeyCollection = Unique(collectionKeyBox, used);
             s.BoardStyle = InkRenderer.Styles[Math.Max(0, boardStyleBox.SelectedIndex)];
             s.ShowWallpaperInk = inkBox.Checked;
+            s.AnimateBoards = animateBox.Checked;
 
             var m = baselineMusic.Clone();
             string dk = Kind(defaultBox, DefaultKinds);

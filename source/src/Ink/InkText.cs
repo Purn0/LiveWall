@@ -53,6 +53,7 @@ namespace LiveWall.Ink
             ReleaseD2D();
             InkImage.ClearCache();
             InkBrush.ClearCache();
+            InkGlow.ClearCache();
             if (cache == null) return;
             foreach (var r in cache.Values) if (r != null && r.Image != null) r.Image.Dispose();
             cache = null;
