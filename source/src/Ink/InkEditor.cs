@@ -36,6 +36,7 @@ namespace LiveWall.Ink
         static int textTab;
         static bool eraseWhole;         // eraser removes whole strokes (instead of only what it touches)
         static int fillGap = 1;         // FillGaps index
+        static string penBrush = InkBrush.Pen;
 
         const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
 
@@ -58,7 +59,7 @@ namespace LiveWall.Ink
         InkMapping map;
         float unit, dpiScale = 1;
         InkToolbar toolbar;
-        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem;
+        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem, penItem;
         ColorPicker colorPicker;
         TextPanel textPanel;
 
@@ -69,6 +70,8 @@ namespace LiveWall.Ink
         bool active, erasing, shaping, liveHasPressure;
         readonly List<InkPoint> live = new List<InkPoint>();
         InkTool liveTool;
+        string liveId, liveBrush;        // the stroke's id from the start: brushes seed their randomness with it
+        uint liveSeed;
         int liveArgb;
         float liveWidth;
         PointF smooth, lastRaw, lastErase;
@@ -321,6 +324,9 @@ namespace LiveWall.Ink
             erasing = false;
             live.Clear();
             liveTool = tool == EditorTool.Highlighter ? InkTool.Highlighter : InkTool.Pen;
+            liveId = NewId();
+            liveBrush = liveTool == InkTool.Pen && InkBrush.IsBrush(penBrush) ? penBrush : null;
+            liveSeed = InkBrush.Seed(liveId);
             liveArgb = color;
             liveWidth = (liveTool == InkTool.Highlighter ? highlighterSize : penSize) * unit;
             liveHasPressure = false;
@@ -375,7 +381,19 @@ namespace LiveWall.Ink
             Rectangle dirty;
             using (var g = frame.CreateGraphics())
             {
-                if (liveTool == InkTool.Highlighter)
+                if (liveBrush != null)
+                {
+                    // Redraw the area of the new segment from the finished drawing: the brush's own pixels, already final.
+                    InkPoint a = live.Count > 1 ? live[live.Count - 2] : live[0], b = live[live.Count - 1];
+                    float reach = liveWidth * 1.7f * InkBrush.Extent(liveBrush) / 2 + 1;
+                    var seg = RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
+                    dirty = TargetRect(RectangleF.Inflate(seg, reach, reach), 3);
+                    CopyRect(baseLayer, g, dirty);
+                    g.SetClip(dirty);
+                    var arr = live.ToArray();
+                    InkBrush.Draw(g, liveBrush, liveArgb, liveWidth, arr, arr.Length, liveSeed, map, dirty);
+                }
+                else if (liveTool == InkTool.Highlighter)
                 {
                     // Translucent: redraw the whole stroke over the untouched layer, or overlaps would darken.
                     RectangleF b = PointBounds(live, liveWidth);
@@ -433,7 +451,7 @@ namespace LiveWall.Ink
             InkPoint tail = live[live.Count - 1];
             if (Math.Abs(tail.X - lastRaw.X) + Math.Abs(tail.Y - lastRaw.Y) > 0.5f) live.Add(new InkPoint(lastRaw.X, lastRaw.Y, lastPressure));
 
-            var stroke = new InkStroke(NewId(), author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray());
+            var stroke = InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush);
             live.Clear();
             Document.Add(stroke);
             var action = new UndoAction();
@@ -607,14 +625,14 @@ namespace LiveWall.Ink
                 // Solid ink only: earlier fills don't block a new one (so an outline drawn on a filled area can still be
                 // filled) and highlighters don't either (the fill goes under them).
                 var order = Rendered.ToList();
-                var blockers = order.Where(s => s.Tool != InkTool.Fill && s.Tool != InkTool.Highlighter).ToList();
+                var blockers = order.Where(s => s.Tool != InkTool.Fill && s.Tool != InkTool.Highlighter && (s.Brush == null || InkBrush.Blocks(s.Brush))).ToList();
                 var ink = new bool[w * h];
                 using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
                 {
                     using (var g = Graphics.FromImage(bmp))
                     {
                         InkRenderer.Prepare(g);
-                        InkRenderer.DrawStrokes(g, blockers, new InkMapping { Scale = 1 });
+                        InkRenderer.DrawStrokes(g, blockers, new InkMapping { Scale = 1 }, true);
                     }
                     var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
                     try
@@ -1039,7 +1057,20 @@ namespace LiveWall.Ink
         List<InkToolbar.Item> BuildToolbar()
         {
             var items = new List<InkToolbar.Item>();
-            items.Add(InkToolbar.Item.Button("\uE70F", "P", "Pen (P)", () => SetTool(EditorTool.Pen), () => tool == EditorTool.Pen));
+            InkToolbar.Item pen = null;
+            pen = InkToolbar.Item.Button("\uE70F", "P", "Pen and brushes (P). Click again: soft, spray, pencil, marker, calligraphy, chalk, crayon, neon, dashed",
+                () =>
+                {
+                    if (tool != EditorTool.Pen) { SetTool(EditorTool.Pen); toolbar.CloseFlyout(); }
+                    else if (toolbar.FlyoutOpen) toolbar.CloseFlyout();
+                    else toolbar.ShowFlyout(pen, BuildBrushFlyout());
+                },
+                () => tool == EditorTool.Pen);
+            pen.Icon = (g, r, fg) => InkBrush.DrawIcon(g, r, penBrush, fg);
+            pen.IconWhen = () => InkBrush.IsBrush(penBrush);
+            pen.HasFlyout = true;
+            penItem = pen;
+            items.Add(pen);
             items.Add(InkToolbar.Item.Button("\uE7E6", "H", "Highlighter (H)", () => SetTool(EditorTool.Highlighter), () => tool == EditorTool.Highlighter));
             InkToolbar.Item eraser = null;
             eraser = InkToolbar.Item.Button("\uE75C", "E", "Eraser (E, or the pen's eraser end / right mouse button). Click again: erase only what it touches, or whole strokes.",
@@ -1121,6 +1152,27 @@ namespace LiveWall.Ink
             selectShape = selectShape == SelectShape.Lasso ? SelectShape.Rectangle : SelectShape.Lasso;
             RefreshToolbar();
             if (toolbar != null && selectItem != null) toolbar.ShowMessage(selectItem, selectShape == SelectShape.Lasso ? "Select: lasso (draw around it)" : "Select: rectangle");
+        }
+
+        List<InkToolbar.Item> BuildBrushFlyout()
+        {
+            var items = new List<InkToolbar.Item>();
+            foreach (string b in InkBrush.All)
+            {
+                string brush = b;
+                Action pick = () =>
+                {
+                    penBrush = brush;
+                    SetTool(EditorTool.Pen);
+                    toolbar.CloseFlyout();
+                    RefreshToolbar();
+                    toolbar.ShowMessage(penItem, InkBrush.Title(brush));
+                };
+                Func<bool> chosen = () => penBrush == brush;
+                items.Add(brush == InkBrush.Pen ? InkToolbar.Item.Button("\uE70F", "P", InkBrush.Tip(brush), pick, chosen)
+                                                : InkToolbar.Item.Custom((g, r, fg) => InkBrush.DrawIcon(g, r, brush, fg), InkBrush.Tip(brush), pick, chosen));
+            }
+            return items;
         }
 
         List<InkToolbar.Item> BuildFillFlyout()

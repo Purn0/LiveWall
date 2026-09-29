@@ -23,6 +23,7 @@ namespace LiveWall.Ink
             public Func<bool> Selected, Enabled;
             public Color Swatch;
             public Action<Graphics, RectangleF, Color> Icon;     // custom-drawn icon instead of a glyph
+            public Func<bool> IconWhen;                           // with a glyph too: the icon only while this is true
             public bool HasFlyout;                                // small corner mark: more choices on click
             public Func<float> Value;                             // slider 0..1
             public Action<float> SetValue;
@@ -284,7 +285,8 @@ namespace LiveWall.Ink
             else if (selected) FillRound(g, inner, Color.FromArgb(255, 80, 84, 90));
             else if (hot && enabled) FillRound(g, inner, Color.FromArgb(255, 60, 64, 67));
 
-            if (it.Icon != null) it.Icon(g, new RectangleF(r.Left + 10 * scale, r.Top + 10 * scale, r.Width - 20 * scale, r.Height - 20 * scale), fg);
+            if (it.Icon != null && (it.IconWhen == null || it.IconWhen()))
+                it.Icon(g, new RectangleF(r.Left + 10 * scale, r.Top + 10 * scale, r.Width - 20 * scale, r.Height - 20 * scale), fg);
             else
             {
                 Font f = haveGlyphs ? glyphFont : textFont;

@@ -76,8 +76,9 @@ namespace LiveWall.Ink
         {
             if (s.Tool == InkTool.Highlighter || s.IsShape || s.Tool == InkTool.Erase) return s.Width;
             if (s.Tool == InkTool.Fill || s.Tool == InkTool.Text || s.Tool == InkTool.Image) return 0;
-            if (!s.HasPressure) return s.Width * PressureFactor(s.Points.Length > 0 ? s.Points[0].P : (byte)128);
-            return s.Width * 1.7f;
+            float k = InkBrush.IsBrush(s.Brush) ? InkBrush.Extent(s.Brush) : 1;
+            if (!s.HasPressure) return s.Width * PressureFactor(s.Points.Length > 0 ? s.Points[0].P : (byte)128) * k;
+            return s.Width * 1.7f * k;
         }
 
         static Color StrokeColor(InkTool tool, int argb)
@@ -95,17 +96,23 @@ namespace LiveWall.Ink
 
         // ------------------------------------------------------------------ strokes
 
-        public static void DrawStrokes(Graphics g, IEnumerable<InkStroke> strokes, InkMapping m)
+        // `solid`: plain coverage for the fill tool's boundaries (brushes without grain, gaps or glow).
+        public static void DrawStrokes(Graphics g, IEnumerable<InkStroke> strokes, InkMapping m, bool solid = false)
         {
-            foreach (var s in strokes) DrawStroke(g, s, m);
+            foreach (var s in strokes) DrawStroke(g, s, m, false, solid);
         }
 
         // Pens with constant pressure (mouse) and highlighters are drawn as one smooth polyline; pens with pressure as
         // round-capped segments whose width follows the pressure (the same way they are drawn live).
         // `opaque`: highlighters at full strength (the desktop ink layer applies their transparency to the whole window).
-        public static void DrawStroke(Graphics g, InkStroke s, InkMapping m, bool opaque = false)
+        public static void DrawStroke(Graphics g, InkStroke s, InkMapping m, bool opaque = false, bool solid = false)
         {
             if (s.Points.Length == 0) return;
+            if (s.Tool == InkTool.Pen && InkBrush.IsBrush(s.Brush))
+            {
+                InkBrush.Draw(g, s.Brush, s.Argb, s.Width, s.Points, s.Points.Length, InkBrush.Seed(s.Id), m, RectangleF.Empty, solid);
+                return;
+            }
             switch (s.Tool)
             {
                 case InkTool.Erase: DrawErase(g, s, m); return;

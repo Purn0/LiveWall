@@ -36,6 +36,9 @@ Boards and drawing
 - Ctrl+Alt+D: draw - on the board if one is shown, otherwise on the wallpaper itself (pictures, GIFs and videos).
   Drawings on a wallpaper are kept per wallpaper and shown above it, below the desktop icons. Tray icon >
   Drawings on wallpapers hides or removes them. Esc (or Ctrl+Alt+D again) when done.
+- Brushes: click the pen button again for soft airbrush, spray, pencil (press lighter for lighter lines), marker,
+  calligraphy, chalk (great on the blackboard), crayon, neon and dashed line. The pen button then shows the brush;
+  P keeps it. Soft and spray don't hold a fill in; the others do.
 - Tools: P pen, H highlighter, E eraser (or the pen's eraser end / right mouse button; it erases only what it
   touches - press E again, or click the eraser button, for "whole strokes"), shapes (L line, A arrow,
   R rectangle, O ellipse; Shift = straight / square / circle; the shapes button also switches filled shapes),
