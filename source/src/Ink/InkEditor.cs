@@ -23,6 +23,7 @@ namespace LiveWall.Ink
         {
             public readonly List<string> Added = new List<string>();
             public readonly List<string> Erased = new List<string>();
+            public readonly List<string[]> Layers = new List<string[]>();   // layer id, what, old value, new value
         }
 
         // Remembered between sessions while LiveWall runs.
@@ -37,6 +38,8 @@ namespace LiveWall.Ink
         static bool eraseWhole;         // eraser removes whole strokes (instead of only what it touches)
         static int fillGap = 1;         // FillGaps index
         static string penBrush = InkBrush.Pen;
+        static bool fillAllLayers;      // fill boundaries from every shown layer, not just the active one
+        static readonly Dictionary<string, string> lastLayer = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // board file -> layer
 
         const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
 
@@ -55,11 +58,15 @@ namespace LiveWall.Ink
         LayeredBitmap frame;             // what is on screen
         Bitmap baseLayer;                // background + finished elements
         Bitmap background;               // background only
-        Bitmap ink;                      // the elements alone (transparent elsewhere)
+        Bitmap ink;                      // the active layer's elements alone (transparent elsewhere)
+        Bitmap below, above;             // shown layers below the active one (over the background) and above it; null when none
+        string activeLayer;              // what drawing, erasing, selecting and filling act on
+        int? previewOpacity;             // the active layer's opacity while the panel's slider is dragged
+        LayersPanel layersPanel;
         InkMapping map;
         float unit, dpiScale = 1;
         InkToolbar toolbar;
-        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem, penItem;
+        InkToolbar.Item colorItem, saveItem, eraserItem, selectItem, penItem, layerItem;
         ColorPicker colorPicker;
         TextPanel textPanel;
 
@@ -125,6 +132,7 @@ namespace LiveWall.Ink
             map = InkMapping.Fill(doc.CanvasWidth, doc.CanvasHeight, monitor.Width, monitor.Height);
             unit = Math.Max(0.5f, doc.CanvasHeight / 1080f);
             tool = lastTool;
+            activeLayer = PickLayer();
             int c;
             color = lastColor.TryGetValue(ColorKey, out c) ? c : InkRenderer.Palette[InkRenderer.DefaultColor(doc.Background)].ToArgb();
         }
@@ -203,12 +211,33 @@ namespace LiveWall.Ink
             }
         }
 
-        // What is drawn: everything visible except text being edited.
-        IEnumerable<InkStroke> Rendered { get { return hiddenId == null ? VisibleStrokes : VisibleStrokes.Where(s => s.Id != hiddenId); } }
+        List<InkStroke> activeCache;
+        int activeRevision = -1;
+        string activeCacheLayer;
 
-        // The elements go onto `ink` (transparent), which is then laid over the background: the eraser clears ink only.
+        // The active layer's elements: what drawing, erasing, selecting and filling act on.
+        List<InkStroke> ActiveStrokes
+        {
+            get
+            {
+                if (activeCache == null || activeRevision != Document.Revision || activeCacheLayer != activeLayer)
+                {
+                    activeCache = VisibleStrokes.Where(s => InkDocument.LayerOf(s) == activeLayer).ToList();
+                    activeRevision = Document.Revision;
+                    activeCacheLayer = activeLayer;
+                }
+                return activeCache;
+            }
+        }
+
+        // What goes on `ink`: the active layer except text being edited.
+        IEnumerable<InkStroke> Rendered { get { return hiddenId == null ? ActiveStrokes : ActiveStrokes.Where(s => s.Id != hiddenId); } }
+
+        // The active layer's elements go onto `ink` (transparent), which is then laid over the background and the layers
+        // below: the eraser clears only that layer.
         void RenderAll(bool present)
         {
+            RenderOtherLayers();
             using (var g = Graphics.FromImage(ink))
             {
                 g.Clear(Color.Transparent);
@@ -241,20 +270,89 @@ namespace LiveWall.Ink
                 InkRenderer.DrawEraseArea(inkGraphics, floating.Source.Select(q => map.ToTarget(q.X, q.Y)).ToArray());
         }
 
-        // baseLayer = background + ink in `r`, then onto the screen.
+        // baseLayer = background, the layers below and the active layer (at its opacity) in `r`; on the screen, the layers
+        // above go on top. Live strokes are drawn over baseLayer, then the layers above again.
         void Compose(Rectangle r, bool present)
         {
             r = Rectangle.Intersect(r, ClientArea);
             if (r.Width <= 0 || r.Height <= 0) return;
             using (var g = Graphics.FromImage(baseLayer))
             {
-                CopyRect(background, g, r);
-                g.DrawImage(ink, r, r, GraphicsUnit.Pixel);
+                CopyRect(below ?? background, g, r);
+                InkRenderer.DrawWithOpacity(g, ink, r, ActiveOpacity);
             }
-            using (var g = Graphics.FromImage(frame.Bitmap)) CopyRect(baseLayer, g, r);
+            using (var g = Graphics.FromImage(frame.Bitmap))
+            {
+                CopyRect(baseLayer, g, r);
+                DrawAbove(g, r);
+            }
             if (present) frame.Present(Handle, Monitor.Location, r == ClientArea ? (Rectangle?)null : r);
             if (present && Selecting && r.IntersectsWith(overlay)) DrawSelection();   // keep the selection on top
         }
+
+        void DrawAbove(Graphics g, Rectangle r) { if (above != null) g.DrawImage(above, r, r, GraphicsUnit.Pixel); }
+
+        int ActiveOpacity
+        {
+            get
+            {
+                if (previewOpacity != null) return previewOpacity.Value;
+                var l = Document.Layer(activeLayer);
+                return l == null || !l.Visible ? 0 : l.Opacity;
+            }
+        }
+
+        // Flattens the shown layers below the active one (over the background) into `below` and those above it into
+        // `above`, once per change of layers: pen input only ever touches `ink`. Nothing extra with a single layer.
+        void RenderOtherLayers()
+        {
+            var layers = Document.Layers;
+            int at = layers.FindIndex(l => l.Id == activeLayer);
+            var lower = layers.Take(Math.Max(0, at)).Where(l => l.Visible && l.Opacity > 0).ToList();
+            var upper = at < 0 ? new List<InkLayerInfo>() : layers.Skip(at + 1).Where(l => l.Visible && l.Opacity > 0).ToList();
+            if (lower.Count == 0) Drop(ref below);
+            if (upper.Count == 0) Drop(ref above);
+            if (lower.Count == 0 && upper.Count == 0) return;
+            var all = VisibleStrokes;
+            using (var scratch = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb))
+            {
+                if (lower.Count > 0)
+                {
+                    if (below == null) below = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb);
+                    using (var g = Graphics.FromImage(below))
+                    {
+                        CopyRect(background, g, ClientArea);
+                        LayersOnto(g, lower, all, scratch);
+                    }
+                }
+                if (upper.Count > 0)
+                {
+                    if (above == null) above = new Bitmap(Monitor.Width, Monitor.Height, PixelFormat.Format32bppPArgb);
+                    using (var g = Graphics.FromImage(above))
+                    {
+                        g.Clear(Color.Transparent);
+                        LayersOnto(g, upper, all, scratch);
+                    }
+                }
+            }
+        }
+
+        void LayersOnto(Graphics g, List<InkLayerInfo> layers, List<InkStroke> all, Bitmap scratch)
+        {
+            foreach (var l in layers)
+            {
+                string id = l.Id;
+                using (var gs = Graphics.FromImage(scratch))
+                {
+                    gs.Clear(Color.Transparent);
+                    InkRenderer.Prepare(gs);
+                    InkRenderer.DrawStrokes(gs, all.Where(s => InkDocument.LayerOf(s) == id), map);
+                }
+                InkRenderer.DrawWithOpacity(g, scratch, ClientArea, l.Opacity);
+            }
+        }
+
+        static void Drop(ref Bitmap b) { if (b != null) { b.Dispose(); b = null; } }
 
         static void CopyRect(Bitmap src, Graphics dst, Rectangle r)
         {
@@ -276,6 +374,9 @@ namespace LiveWall.Ink
 
         static string NewId() { return Guid.NewGuid().ToString("N"); }
 
+        // New elements go on the active layer.
+        void AddToDoc(InkStroke s) { Document.Add(s.InLayer(activeLayer)); }
+
         // ------------------------------------------------------------------ freehand strokes
 
         void Begin(Point client, byte pressure, bool eraserTip)
@@ -283,6 +384,7 @@ namespace LiveWall.Ink
             if (closing) return;
             if (toolbar != null) toolbar.CloseFlyout();
             if (active) End();
+            if (tool != EditorTool.Picker && !ActiveEditable()) return;
             if (eraserTip || tool == EditorTool.Eraser)
             {
                 active = true;
@@ -392,6 +494,8 @@ namespace LiveWall.Ink
                     g.SetClip(dirty);
                     var arr = live.ToArray();
                     InkBrush.Draw(g, liveBrush, liveArgb, liveWidth, arr, arr.Length, liveSeed, map, dirty);
+                    g.ResetClip();
+                    DrawAbove(g, dirty);
                 }
                 else if (liveTool == InkTool.Highlighter)
                 {
@@ -403,7 +507,22 @@ namespace LiveWall.Ink
                     g.SetClip(dirty);
                     var arr = live.ToArray();
                     InkRenderer.DrawPoints(g, liveTool, liveArgb, liveWidth, arr, arr.Length, false, map);
+                    g.ResetClip();
+                    DrawAbove(g, dirty);
                     liveDirty = now;
+                }
+                else if (above != null)
+                {
+                    // Layers above: redraw the new segment's area from baseLayer, then those layers over it.
+                    InkPoint a = live.Count > 1 ? live[live.Count - 2] : live[0], b = live[live.Count - 1];
+                    var seg = RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
+                    dirty = TargetRect(RectangleF.Inflate(seg, liveWidth * 1.8f, liveWidth * 1.8f), 3);
+                    CopyRect(baseLayer, g, dirty);
+                    g.SetClip(dirty);
+                    var arr = live.ToArray();
+                    InkRenderer.DrawPointsIn(g, liveTool, liveArgb, liveWidth, arr, arr.Length, liveHasPressure, map, dirty);
+                    g.ResetClip();
+                    DrawAbove(g, dirty);
                 }
                 else
                 {
@@ -453,7 +572,7 @@ namespace LiveWall.Ink
 
             var stroke = InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush);
             live.Clear();
-            Document.Add(stroke);
+            AddToDoc(stroke);
             var action = new UndoAction();
             action.Added.Add(stroke.Id);
             undo.Push(action);
@@ -499,8 +618,8 @@ namespace LiveWall.Ink
             var s = new InkStroke(NewId(), author, DateTime.UtcNow.Ticks, InkTool.Erase, 0, EraseDiameter, erasePath.ToArray());
             erasePath.Clear();
             RectangleF b = s.Bounds;
-            if (!VisibleStrokes.Any(v => v.Tool != InkTool.Erase && v.Bounds.IntersectsWith(b))) return;
-            Document.Add(s);
+            if (!ActiveStrokes.Any(v => v.Tool != InkTool.Erase && v.Bounds.IntersectsWith(b))) return;
+            AddToDoc(s);
             var action = new UndoAction();
             action.Added.Add(s.Id);
             undo.Push(action);
@@ -516,7 +635,7 @@ namespace LiveWall.Ink
             int steps = Math.Max(1, (int)Math.Ceiling(len / Math.Max(1f, radius * 0.5f)));
             var hit = new List<string>();
             RectangleF dirty = RectangleF.Empty;
-            foreach (var s in VisibleStrokes)
+            foreach (var s in ActiveStrokes)
             {
                 for (int i = 0; i <= steps; i++)
                 {
@@ -546,7 +665,7 @@ namespace LiveWall.Ink
                 action.Erased.AddRange(Document.Erase(new[] { replaced.Id }, author));
                 dirty = RectangleF.Union(dirty, replaced.Bounds);
             }
-            Document.Add(s);
+            AddToDoc(s);
             action.Added.Add(s.Id);
             undo.Push(action);
             redo.Clear();
@@ -593,6 +712,8 @@ namespace LiveWall.Ink
                 CopyRect(baseLayer, g, dirty);
                 g.SetClip(now);
                 InkRenderer.DrawShape(g, lastShape, color, w, shapeStart, shapeEnd, ShapeFilled, map);
+                g.ResetClip();
+                DrawAbove(g, dirty);
             }
             liveDirty = now;
             frame.Present(Handle, Monitor.Location, dirty);
@@ -625,26 +746,22 @@ namespace LiveWall.Ink
                 // Solid ink only: earlier fills don't block a new one (so an outline drawn on a filled area can still be
                 // filled) and highlighters don't either (the fill goes under them).
                 var order = Rendered.ToList();
-                var blockers = order.Where(s => s.Tool != InkTool.Fill && s.Tool != InkTool.Highlighter && (s.Brush == null || InkBrush.Blocks(s.Brush))).ToList();
+                Func<InkStroke, bool> blocks = s => s.Tool != InkTool.Fill && s.Tool != InkTool.Highlighter && (s.Brush == null || InkBrush.Blocks(s.Brush));
+                var blockers = order.Where(blocks).ToList();
                 var ink = new bool[w * h];
                 using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
                 {
-                    using (var g = Graphics.FromImage(bmp))
+                    if (fillAllLayers && !Document.IsFlat)
                     {
-                        InkRenderer.Prepare(g);
-                        InkRenderer.DrawStrokes(g, blockers, new InkMapping { Scale = 1 }, true);
-                    }
-                    var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
-                    try
-                    {
-                        var row = new int[w];
-                        for (int y = 0; y < h; y++)
+                        // Every shown layer on its own (its erasers clear only it), all adding to the boundaries.
+                        var all = VisibleStrokes;
+                        foreach (var l in Document.Layers.Where(l => l.Visible))
                         {
-                            Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, w);
-                            for (int x = 0; x < w; x++) ink[y * w + x] = ((row[x] >> 24) & 0xFF) >= FillInkAlpha;
+                            string id = l.Id;
+                            AddInkMask(ink, bmp, id == activeLayer ? blockers : all.Where(s => InkDocument.LayerOf(s) == id && blocks(s)));
                         }
                     }
-                    finally { bmp.UnlockBits(data); }
+                    else AddInkMask(ink, bmp, blockers);
                 }
                 if (ink[sy * w + sx])
                 {
@@ -658,6 +775,29 @@ namespace LiveWall.Ink
                 if (mask != null) AddElement(InkStroke.FillRegion(NewId(), author, DateTime.UtcNow.Ticks, color, mask, FillUnder(order, mask)), null, Rectangle.Empty);
             }
             finally { UpdateCursor(); }
+        }
+
+        // Where `strokes` (drawn solid at canvas scale on `bmp`) cover the canvas, `ink` becomes true.
+        void AddInkMask(bool[] ink, Bitmap bmp, IEnumerable<InkStroke> strokes)
+        {
+            int w = bmp.Width, h = bmp.Height;
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                InkRenderer.Prepare(g);
+                InkRenderer.DrawStrokes(g, strokes, new InkMapping { Scale = 1 }, true);
+            }
+            var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                var row = new int[w];
+                for (int y = 0; y < h; y++)
+                {
+                    Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, w);
+                    for (int x = 0; x < w; x++) if (((row[x] >> 24) & 0xFF) >= FillInkAlpha) ink[y * w + x] = true;
+                }
+            }
+            finally { bmp.UnlockBits(data); }
         }
 
         // Faint anti-aliased edges don't block a fill: the gap closing takes care of thin lines.
@@ -683,7 +823,7 @@ namespace LiveWall.Ink
         void PickColor(Point client)
         {
             int x = Math.Max(0, Math.Min(Monitor.Width - 1, client.X)), y = Math.Max(0, Math.Min(Monitor.Height - 1, client.Y));
-            Color c = baseLayer.GetPixel(x, y);
+            Color c = frame.Bitmap.GetPixel(x, y);   // everything shown, all layers
             SetColor(Color.FromArgb(255, c).ToArgb());
             AddRecent(color);
             SetTool(toolBeforePicker == EditorTool.Picker ? EditorTool.Pen : toolBeforePicker);
@@ -780,6 +920,7 @@ namespace LiveWall.Ink
             {
                 CopyRect(baseLayer, g, dirty);
                 if (r != null) g.DrawImageUnscaled(r.Image, at);
+                DrawAbove(g, dirty);
                 using (var b = new SolidBrush(Color.FromArgb(200, 26, 115, 232))) g.FillRectangle(b, marker);
             }
             if (r != null) r.Image.Dispose();
@@ -927,7 +1068,9 @@ namespace LiveWall.Ink
             var a = undo.Pop();
             Document.Erase(a.Added, author);
             Document.Restore(a.Erased, author);
+            for (int i = a.Layers.Count - 1; i >= 0; i--) Document.SetLayer(a.Layers[i][0], a.Layers[i][1], a.Layers[i][2], author);
             redo.Push(a);
+            if (a.Layers.Count > 0) KeepActiveLayer();
             RenderAll(true);
             RefreshToolbar();
         }
@@ -939,9 +1082,170 @@ namespace LiveWall.Ink
             var a = redo.Pop();
             Document.Restore(a.Added, author);
             Document.Erase(a.Erased, author);
+            foreach (var c in a.Layers) Document.SetLayer(c[0], c[1], c[3], author);
             undo.Push(a);
+            if (a.Layers.Count > 0) KeepActiveLayer();
             RenderAll(true);
             RefreshToolbar();
+        }
+
+        // ------------------------------------------------------------------ layers (boards)
+
+        // The layer to draw on when the editor opens: the one used last on this board, else the top one.
+        string PickLayer()
+        {
+            var layers = Document.Layers;
+            if (layers.Count == 0)
+            {
+                Document.SetLayer(InkDocument.BaseLayer, "deleted", "0", author);
+                layers = Document.Layers;
+            }
+            string id;
+            if (lastLayer.TryGetValue(Document.FilePath, out id) && layers.Any(l => l.Id == id)) return id;
+            return layers[layers.Count - 1].Id;
+        }
+
+        string LayerTitle
+        {
+            get
+            {
+                var l = Document.Layer(activeLayer);
+                if (l == null) return "";
+                return l.Name + (!l.Visible ? " (hidden)" : l.Locked ? " (locked)" : "");
+            }
+        }
+
+        public List<InkLayerInfo> LayersTopFirst { get { var l = Document.Layers; l.Reverse(); return l; } }
+        public string ActiveLayerId { get { return activeLayer; } }
+
+        // Drawing, erasing, filling, pasting... on a hidden or locked layer: a note instead.
+        bool ActiveEditable()
+        {
+            var l = Document.Layer(activeLayer);
+            if (l == null || (l.Visible && !l.Locked)) return true;
+            if (toolbar != null && layerItem != null)
+                toolbar.ShowMessage(layerItem, l.Locked ? "This layer is locked: unlock it in Layers, or pick another layer" : "This layer is hidden: show it in Layers first");
+            return false;
+        }
+
+        void ShowLayersPanel()
+        {
+            if (!IsBoard) return;
+            if (layersPanel != null && layersPanel.Visible) { layersPanel.Hide(); return; }
+            if (active) End();
+            if (Writing) CommitText();
+            if (layersPanel == null)
+            {
+                layersPanel = new LayersPanel(this, dpiScale);
+                layersPanel.VisibleChanged += (o, e) => { if (!layersPanel.Visible && !closing) Activate(); };
+            }
+            layersPanel.RefreshLayers();
+            layersPanel.PlaceBelow(ToolbarItemScreenRect(layerItem), Monitor);
+            layersPanel.Show(this);
+            layersPanel.Activate();
+        }
+
+        public void SelectLayer(string id)
+        {
+            if (Document.Layer(id) == null || id == activeLayer) return;
+            if (active) End();
+            if (Writing) CommitText();
+            PutDown();
+            activeLayer = id;
+            lastLayer[Document.FilePath] = id;
+            AfterLayerChange();
+        }
+
+        public void NewLayer()
+        {
+            if (Document.Layers.Count >= InkDocument.MaxLayers) return;
+            PutDown();
+            var names = new HashSet<string>(Document.Layers.Select(l => l.Name));
+            int n = Document.Layers.Count + 1;
+            while (names.Contains("Layer " + n)) n++;
+            string id = Document.AddLayer("Layer " + n, author);
+            var a = new UndoAction();
+            a.Layers.Add(new[] { id, "deleted", "1", "0" });
+            undo.Push(a);
+            redo.Clear();
+            activeLayer = id;
+            lastLayer[Document.FilePath] = id;
+            AfterLayerChange();
+        }
+
+        public void DeleteLayer(string id)
+        {
+            var layers = Document.Layers;
+            if (layers.Count <= 1) return;
+            ChangeLayer(id, "deleted", "1");
+        }
+
+        // dir 1 = up (towards the top), -1 = down.
+        public void MoveLayer(string id, int dir)
+        {
+            var ls = Document.Layers;
+            int i = ls.FindIndex(l => l.Id == id), j = i + dir;
+            if (i < 0 || j < 0 || j >= ls.Count) return;
+            double order = dir > 0 ? (j == ls.Count - 1 ? ls[j].Order + 1 : (ls[j].Order + ls[j + 1].Order) / 2)
+                                   : (j == 0 ? ls[0].Order - 1 : (ls[j].Order + ls[j - 1].Order) / 2);
+            ChangeLayer(id, "order", order.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        public void RenameLayer(string id, string name)
+        {
+            name = (name ?? "").Trim();
+            if (name.Length > 0) ChangeLayer(id, "name", name.Length > 40 ? name.Substring(0, 40) : name);
+        }
+
+        public void ShowLayer(string id, bool show) { ChangeLayer(id, "show", show ? "1" : "0"); }
+        public void LockLayer(string id, bool locked) { ChangeLayer(id, "lock", locked ? "1" : "0"); }
+
+        // The active layer's opacity while its slider moves (nothing written yet), then for good.
+        public void PreviewLayerOpacity(int value)
+        {
+            previewOpacity = Math.Max(0, Math.Min(100, value));
+            Compose(ClientArea, true);
+        }
+
+        public void SetLayerOpacity(string id, int value)
+        {
+            previewOpacity = null;
+            ChangeLayer(id, "opacity", Math.Max(0, Math.Min(100, value)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Compose(ClientArea, true);
+        }
+
+        // One layer property, as one undo step.
+        void ChangeLayer(string id, string what, string value)
+        {
+            if (active) End();
+            if (Writing) CommitText();
+            PutDown();
+            string old = Document.LayerValue(id, what);
+            if (old == null || old == value) return;
+            Document.SetLayer(id, what, value, author);
+            var a = new UndoAction();
+            a.Layers.Add(new[] { id, what, old, value });
+            undo.Push(a);
+            redo.Clear();
+            AfterLayerChange();
+        }
+
+        // The active layer was deleted (or undone away): draw on the top one.
+        void KeepActiveLayer()
+        {
+            var l = Document.Layer(activeLayer);
+            if (l != null && !l.Deleted) return;
+            var layers = Document.Layers;
+            if (layers.Count > 0) activeLayer = layers[layers.Count - 1].Id;
+            if (layersPanel != null && layersPanel.Visible) layersPanel.RefreshLayers();
+        }
+
+        void AfterLayerChange()
+        {
+            KeepActiveLayer();
+            RenderAll(true);
+            RefreshToolbar();
+            if (layersPanel != null && layersPanel.Visible) layersPanel.RefreshLayers();
         }
 
         public void ClearAll()
@@ -949,7 +1253,8 @@ namespace LiveWall.Ink
             if (active) End();
             if (Writing) CancelText();
             CancelSelection();
-            var ids = VisibleStrokes.Select(s => s.Id).ToList();
+            if (!ActiveEditable()) return;
+            var ids = ActiveStrokes.Select(s => s.Id).ToList();
             if (ids.Count == 0) return;
             var a = new UndoAction();
             a.Erased.AddRange(Document.Erase(ids, author));
@@ -1016,7 +1321,13 @@ namespace LiveWall.Ink
             {
                 Directory.CreateDirectory(Boards.ExportDir);
                 string path = Path.Combine(Boards.ExportDir, exportName + " " + DateTime.Now.ToString("HH.mm.ss", System.Globalization.CultureInfo.InvariantCulture) + ".png");
-                baseLayer.Save(path, ImageFormat.Png);
+                if (above == null) baseLayer.Save(path, ImageFormat.Png);
+                else
+                    using (var all = new Bitmap(baseLayer))
+                    {
+                        using (var g = Graphics.FromImage(all)) g.DrawImageUnscaled(above, 0, 0);
+                        all.Save(path, ImageFormat.Png);
+                    }
                 Log.Info("Saved drawing as " + path);
                 if (toolbar != null) toolbar.ShowMessage(saveItem, "Saved: Pictures\\LiveWall Boards\\" + Path.GetFileName(path));
             }
@@ -1118,7 +1429,15 @@ namespace LiveWall.Ink
             items.Add(InkToolbar.Item.Separator());
             items.Add(InkToolbar.Item.Button("\uE7A7", "\u21B6", "Undo (Ctrl+Z)", Undo, null, () => undo.Count > 0));
             items.Add(InkToolbar.Item.Button("\uE7A6", "\u21B7", "Redo (Ctrl+Y)", Redo, null, () => redo.Count > 0));
-            items.Add(InkToolbar.Item.Button("\uE74D", "X", "Clear everything (Delete) - can be undone", ClearAll, null, () => VisibleStrokes.Count > 0));
+            items.Add(InkToolbar.Item.Button("\uE74D", "X", IsBoard ? "Clear this layer (Delete) - can be undone" : "Clear everything (Delete) - can be undone",
+                ClearAll, null, () => ActiveStrokes.Count > 0));
+            if (IsBoard)
+            {
+                items.Add(InkToolbar.Item.Separator());
+                layerItem = InkToolbar.Item.Label(() => LayerTitle, "Layers: add, hide, lock, reorder and fade layers; the one named here is the one you draw on",
+                    ShowLayersPanel);
+                items.Add(layerItem);
+            }
             if (IsBoard)
             {
                 items.Add(InkToolbar.Item.Separator());
@@ -1181,7 +1500,10 @@ namespace LiveWall.Ink
             {
                 InkToolbar.Item.Segment(new[] { "Exact", "Close small gaps", "Close gaps" },
                     "How big a gap in an outline the fill jumps (a circle that doesn't quite close still fills)",
-                    () => fillGap, i => { fillGap = i; SetTool(EditorTool.Fill); toolbar.CloseFlyout(); })
+                    () => fillGap, i => { fillGap = i; SetTool(EditorTool.Fill); toolbar.CloseFlyout(); }),
+                InkToolbar.Item.Separator(),
+                InkToolbar.Item.Segment(new[] { "This layer", "All layers" }, "Which lines stop the fill: the layer you draw on, or every shown layer",
+                    () => fillAllLayers ? 1 : 0, i => { fillAllLayers = i == 1; SetTool(EditorTool.Fill); toolbar.CloseFlyout(); })
             };
         }
 
@@ -1360,6 +1682,9 @@ namespace LiveWall.Ink
             if (baseLayer != null) { baseLayer.Dispose(); baseLayer = null; }
             if (background != null) { background.Dispose(); background = null; }
             if (ink != null) { ink.Dispose(); ink = null; }
+            Drop(ref below);
+            Drop(ref above);
+            if (layersPanel != null && !layersPanel.IsDisposed) layersPanel.Close();
             if (picture != null) picture.Dispose();
             if (eraserCursor != null) { Cursor = Cursors.Default; eraserCursor.Dispose(); eraserCursor = null; }
             if (eraserCursorIcon != IntPtr.Zero) { DestroyIcon(eraserCursorIcon); eraserCursorIcon = IntPtr.Zero; }

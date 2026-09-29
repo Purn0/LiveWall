@@ -41,6 +41,7 @@ namespace LiveWall.Ink
         public readonly string Base;         // element this one replaces: it takes that one's place in the drawing order
         public readonly string Under;        // element this one is drawn just below (a fill under later highlighters and pens)
         public readonly string Brush;        // pens: InkBrush kind (null = the round pen)
+        public readonly string Layer;        // layer id (null = the base layer)
         public readonly string Data;         // images: PNG, base64
         RectangleF bounds;
         bool boundsKnown;
@@ -50,13 +51,14 @@ namespace LiveWall.Ink
 
         InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, bool filled,
                   InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId, string data,
-                  string under = null, string brush = null)
+                  string under = null, string brush = null, string layer = null)
         {
             Id = id; Author = author; Ticks = ticks; Tool = tool; Argb = argb; Width = Math.Max(0.5f, width);
             Points = points ?? new InkPoint[0];
             Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId; Data = data;
             Under = under;
             Brush = tool == InkTool.Pen && !string.IsNullOrEmpty(brush) ? brush : null;
+            Layer = string.IsNullOrEmpty(layer) || layer == InkDocument.BaseLayer ? null : layer;
             if (tool == InkTool.Pen || tool == InkTool.Highlighter)
             {
                 byte first = Points.Length > 0 ? Points[0].P : (byte)128;
@@ -93,13 +95,20 @@ namespace LiveWall.Ink
         // The same element in another color (a new element in the same place: see the class comment).
         public InkStroke Recolored(string id, string author, long ticks, int argb)
         {
-            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data, null, Brush);
+            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data, null, Brush, Layer);
         }
 
-        InkStroke With(string baseId, string under, string brush)
+        InkStroke With(string baseId, string under, string brush, string layer)
         {
-            return baseId == null && under == null && brush == null ? this
-                : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data, under, brush);
+            return baseId == null && under == null && brush == null && layer == null ? this
+                : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data, under, brush, layer);
+        }
+
+        // The same element on a layer (the editor puts new elements on the active one).
+        public InkStroke InLayer(string layer)
+        {
+            string l = string.IsNullOrEmpty(layer) || layer == InkDocument.BaseLayer ? null : layer;
+            return l == Layer ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Base, Data, Under, Brush, l);
         }
 
         // Clears the area inside the outline (canvas units).
@@ -279,6 +288,7 @@ namespace LiveWall.Ink
             if (Base != null) sb.Append(" z=").Append(Base);
             if (Under != null) sb.Append(" under=").Append(Under);
             if (Brush != null) sb.Append(" brush=").Append(Brush);
+            if (Layer != null) sb.Append(" layer=").Append(Layer);
             return sb.ToString();
         }
 
@@ -286,14 +296,15 @@ namespace LiveWall.Ink
         {
             InkStroke s = ParseElement(f);
             if (s == null) return null;
-            string baseId = null, under = null, brush = null;
+            string baseId = null, under = null, brush = null, layer = null;
             for (int i = 8; i < f.Length; i++)
             {
                 if (f[i].StartsWith("z=")) baseId = f[i].Substring(2);
                 else if (f[i].StartsWith("under=")) under = f[i].Substring(6);
                 else if (f[i].StartsWith("brush=")) brush = f[i].Substring(6);
+                else if (f[i].StartsWith("layer=")) layer = f[i].Substring(6);
             }
-            return s.With(baseId, under, brush);
+            return s.With(baseId, under, brush, layer);
         }
 
         static InkStroke ParseElement(string[] f)
@@ -356,6 +367,17 @@ namespace LiveWall.Ink
         }
     }
 
+    // One layer of a board (see InkDocument's L records).
+    internal sealed class InkLayerInfo
+    {
+        public string Id, Name;
+        public double Order;          // bottom to top
+        public bool Visible = true, Locked, Deleted;
+        public int Opacity = 100;     // percent
+
+        public InkLayerInfo Clone() { return (InkLayerInfo)MemberwiseClone(); }
+    }
+
     // A drawing: a board, or the drawings on one wallpaper.
     //
     // Stored as a UTF-8 text file that is only ever appended to, one operation per line:
@@ -373,8 +395,13 @@ namespace LiveWall.Ink
     //       dashed); older versions ignore it and draw a round pen
     //       optional under=<id>: drawn just below that element (a fill goes under the highlighters and pens drawn after
     //       the last fill or eraser it overlaps); older versions ignore it and draw the element on top
+    //       optional layer=<id>: the layer it is on (none = the base layer)
     //   - <id> <author> <ticks>         erase a stroke
     //   ~ <id> <author> <ticks>         restore an erased stroke (undo of an erase)
+    //   L <id> <author> <ticks> <what> [value]    a layer (boards): new <name>, name <name> (escaped), order <number>
+    //       (bottom to top), show 0|1, opacity <0-100>, lock 0|1, delete, restore. The last record of each kind wins.
+    //       The base layer ("base") always exists unless deleted; older versions ignore these lines and elements'
+    //       layer=, and show every layer flattened.
     // Each stroke has a globally unique id and never changes, so logs from several people can simply be merged.
     internal sealed class InkDocument
     {
@@ -390,7 +417,11 @@ namespace LiveWall.Ink
         readonly List<InkStroke> strokes = new List<InkStroke>();
         readonly Dictionary<string, InkStroke> byId = new Dictionary<string, InkStroke>();
         readonly HashSet<string> erased = new HashSet<string>();
+        readonly Dictionary<string, InkLayerInfo> layers = new Dictionary<string, InkLayerInfo>();
         bool onDisk;
+
+        public const string BaseLayer = "base";
+        public const int MaxLayers = 8;
 
         InkDocument(string path, int w, int h, string background, string title)
         {
@@ -399,6 +430,7 @@ namespace LiveWall.Ink
             CanvasHeight = Math.Max(16, h);
             Background = background ?? NoBackground;
             Title = title ?? "";
+            layers[BaseLayer] = new InkLayerInfo { Id = BaseLayer, Name = "Layer 1" };
         }
 
         public bool Exists { get { return onDisk; } }
@@ -434,6 +466,7 @@ namespace LiveWall.Ink
                         }
                         case "-": if (f.Length >= 2) doc.erased.Add(f[1]); break;
                         case "~": if (f.Length >= 2) doc.erased.Remove(f[1]); break;
+                        case "L": if (f.Length >= 5) doc.ApplyLayerRecord(f[1], f[4], f.Length > 5 ? f[5] : ""); break;
                     }
                 }
                 doc.onDisk = true;
@@ -451,17 +484,129 @@ namespace LiveWall.Ink
             if (s.Base != null && byId.TryGetValue(s.Base, out other)) at = strokes.IndexOf(other) + 1;
             else if (s.Under != null && byId.TryGetValue(s.Under, out other)) at = strokes.IndexOf(other);
             strokes.Insert(at, s);
+            if (s.Layer != null) LayerFor(s.Layer);
             byId[s.Id] = s;
         }
 
+        // Not erased and not on a deleted layer (hidden layers included), in drawing order.
         public List<InkStroke> VisibleStrokes()
         {
             var list = new List<InkStroke>(strokes.Count);
-            foreach (var s in strokes) if (!erased.Contains(s.Id)) list.Add(s);
+            foreach (var s in strokes) if (!erased.Contains(s.Id) && !OnDeletedLayer(s)) list.Add(s);
             return list;
         }
 
-        public int VisibleCount { get { return strokes.Count(s => !erased.Contains(s.Id)); } }
+        public int VisibleCount { get { return strokes.Count(s => !erased.Contains(s.Id) && !OnDeletedLayer(s)); } }
+
+        bool OnDeletedLayer(InkStroke s)
+        {
+            InkLayerInfo l;
+            return layers.TryGetValue(s.Layer ?? BaseLayer, out l) && l.Deleted;
+        }
+
+        // ------------------------------------------------------------------ layers
+
+        public static string LayerOf(InkStroke s) { return s.Layer ?? BaseLayer; }
+
+        // Bottom to top, without deleted ones.
+        public List<InkLayerInfo> Layers
+        {
+            get { return layers.Values.Where(l => !l.Deleted).OrderBy(l => l.Order).ThenBy(l => l.Id, StringComparer.Ordinal).ToList(); }
+        }
+
+        public InkLayerInfo Layer(string id)
+        {
+            InkLayerInfo l;
+            return id != null && layers.TryGetValue(id, out l) ? l : null;
+        }
+
+        // A single visible layer at full strength: drawn exactly as before there were layers.
+        public bool IsFlat
+        {
+            get { var ls = Layers; return ls.Count == 1 && ls[0].Visible && ls[0].Opacity >= 100; }
+        }
+
+        // What a picture of the drawing shows: the shown layers, bottom to top, each with its elements.
+        public List<KeyValuePair<InkLayerInfo, List<InkStroke>>> Snapshot()
+        {
+            var all = VisibleStrokes();
+            var list = new List<KeyValuePair<InkLayerInfo, List<InkStroke>>>();
+            foreach (var l in Layers)
+                if (l.Visible && l.Opacity > 0) list.Add(new KeyValuePair<InkLayerInfo, List<InkStroke>>(l.Clone(), all.Where(s => LayerOf(s) == l.Id).ToList()));
+            return list;
+        }
+
+        // The elements on shown layers, flattened (drawings on wallpapers, which don't use layers).
+        public List<InkStroke> ShownStrokes()
+        {
+            return VisibleStrokes().Where(s => { var l = Layer(LayerOf(s)); return l == null || l.Visible; }).ToList();
+        }
+
+        public string AddLayer(string name, string author)
+        {
+            string id = Guid.NewGuid().ToString("N");
+            var ci = CultureInfo.InvariantCulture;
+            double order = layers.Values.Where(l => !l.Deleted).Select(l => l.Order).DefaultIfEmpty(0).Max() + 1;
+            layers[id] = new InkLayerInfo { Id = id, Name = name, Order = order };
+            Revision++;
+            string stamp = " " + Safe(author) + " " + DateTime.UtcNow.Ticks.ToString(ci);
+            Append(new[] { "L " + id + stamp + " new " + Uri.EscapeDataString(name), "L " + id + stamp + " order " + order.ToString("R", ci) });
+            return id;
+        }
+
+        // `what`: name, order, show, opacity, lock, deleted (values as LayerValue gives them). Nothing is written when the
+        // value doesn't change it.
+        public void SetLayer(string id, string what, string value, string author)
+        {
+            var l = Layer(id);
+            if (l == null || LayerValue(id, what) == value) return;
+            string record = what == "deleted" ? (value == "1" ? "delete" : "restore") : what + " " + (what == "name" ? Uri.EscapeDataString(value) : value);
+            ApplyLayerRecord(id, record.Split(' ')[0], record.IndexOf(' ') > 0 ? record.Substring(record.IndexOf(' ') + 1) : "");
+            Revision++;
+            Append(new[] { "L " + id + " " + Safe(author) + " " + DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture) + " " + record });
+        }
+
+        public string LayerValue(string id, string what)
+        {
+            var l = Layer(id);
+            if (l == null) return null;
+            switch (what)
+            {
+                case "name": return l.Name;
+                case "order": return l.Order.ToString("R", CultureInfo.InvariantCulture);
+                case "show": return l.Visible ? "1" : "0";
+                case "opacity": return l.Opacity.ToString(CultureInfo.InvariantCulture);
+                case "lock": return l.Locked ? "1" : "0";
+                case "deleted": return l.Deleted ? "1" : "0";
+                default: return null;
+            }
+        }
+
+        void ApplyLayerRecord(string id, string what, string value)
+        {
+            var ci = CultureInfo.InvariantCulture;
+            InkLayerInfo l = LayerFor(id);
+            switch (what)
+            {
+                case "new": case "name": l.Name = Uri.UnescapeDataString(value); break;
+                case "order": { double o; if (double.TryParse(value, NumberStyles.Float, ci, out o)) l.Order = o; break; }
+                case "show": l.Visible = value != "0"; break;
+                case "opacity": { int o; if (int.TryParse(value, NumberStyles.Integer, ci, out o)) l.Opacity = Math.Max(0, Math.Min(100, o)); break; }
+                case "lock": l.Locked = value == "1"; break;
+                case "delete": l.Deleted = true; break;
+                case "restore": l.Deleted = false; break;
+            }
+        }
+
+        // A layer named by a record or an element before (or without) its "new" record: made up, on top.
+        InkLayerInfo LayerFor(string id)
+        {
+            InkLayerInfo l;
+            if (layers.TryGetValue(id, out l)) return l;
+            l = new InkLayerInfo { Id = id, Name = "Layer", Order = layers.Values.Select(x => x.Order).DefaultIfEmpty(0).Max() + 1 };
+            layers[id] = l;
+            return l;
+        }
 
         public bool IsVisible(string id) { return byId.ContainsKey(id) && !erased.Contains(id); }
 

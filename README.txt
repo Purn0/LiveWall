@@ -53,6 +53,11 @@ Boards and drawing
   in other apps (a screenshot, a browser's "Copy image", Paint, Photos) and picture files copied in File Explorer
   (PNG, JPEG, GIF, BMP, TIFF, and WebP/HEIC/AVIF when Windows can open them). Enter, Esc or clicking outside puts
   it down; Ctrl+Z before that puts it back.
+- Layers (boards): the layer button on the toolbar shows the layer you draw on; click it for the Layers panel: up to
+  8 layers, each with an eye (show / hide) and a lock, New, Delete, Up, Down, Rename (or double-click a name, F2) and
+  the opacity of the layer you draw on. Drawing, erasing, selecting, pasting and filling act on that layer only; the
+  fill button's second click can take the lines of all shown layers instead. Layer changes can be undone. The board
+  picture (the wallpaper) and saved copies show the layers as you see them.
 - Colors: 1-9, or the rainbow button for any color (color square, RGB, HSV, hex, recent colors). Size: the
   slider, [ and ], or the mouse wheel over the slider. Ctrl+Z / Ctrl+Y undo/redo, Delete clears (undoable),
   B board background, Tab or the Today | Permanent switch changes board, Ctrl+S saves a copy as a picture.

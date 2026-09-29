@@ -304,12 +304,12 @@ namespace LiveWall.Ink
             if (f.Source != null)
             {
                 var erase = InkStroke.EraseArea(NewId(), author, DateTime.UtcNow.Ticks, f.Source);
-                Document.Add(erase);
+                AddToDoc(erase);
                 action.Added.Add(erase.Id);
                 dirty = erase.Bounds;
             }
             var item = MakeImageItem(f);
-            Document.Add(item);
+            AddToDoc(item);
             action.Added.Add(item.Id);
             dirty = dirty.IsEmpty ? item.Bounds : RectangleF.Union(dirty, item.Bounds);
             undo.Push(action);
@@ -370,6 +370,7 @@ namespace LiveWall.Ink
         {
             if (active) End();
             PutDown();
+            if (!ActiveEditable()) return;
             SetTool(EditorTool.Select);
             var c = new[] { map.ToTarget(0, 0), map.ToTarget(Document.CanvasWidth, 0), map.ToTarget(Document.CanvasWidth, Document.CanvasHeight), map.ToTarget(0, Document.CanvasHeight) };
             Lift(c.Select(q => new PointF(Math.Max(0, Math.Min(Monitor.Width, q.X)), Math.Max(0, Math.Min(Monitor.Height, q.Y)))).ToArray());
@@ -387,7 +388,7 @@ namespace LiveWall.Ink
             if (f.Source != null)
             {
                 var erase = InkStroke.EraseArea(NewId(), author, DateTime.UtcNow.Ticks, f.Source);
-                Document.Add(erase);
+                AddToDoc(erase);
                 var action = new UndoAction();
                 action.Added.Add(erase.Id);
                 undo.Push(action);
@@ -444,6 +445,7 @@ namespace LiveWall.Ink
         void Paste()
         {
             // Up to twice the screen: sharp when enlarged a little, without holding a whole camera photo in memory.
+            if (!ActiveEditable()) return;
             string problem;
             Bitmap img = InkImage.FromClipboard(Monitor.Width * 2, Monitor.Height * 2, out problem);
             if (img == null)
@@ -508,9 +510,10 @@ namespace LiveWall.Ink
             {
                 CopyRect(baseLayer, g, dirty);
                 g.SetClip(dirty);
+                if (floating != null) InkImage.DrawOn(g, floating.Image, floating.ImageCorners(), drag == DragKind.None);
+                DrawAbove(g, dirty);
                 if (floating != null)
                 {
-                    InkImage.DrawOn(g, floating.Image, floating.ImageCorners(), drag == DragKind.None);
                     PointF[] box = floating.Box();
                     DashedPolygon(g, box);
                     PointF top = floating.ToScreen(0, -floating.H / 2), knob = floating.ToScreen(0, -floating.H / 2 - RotateReach);

@@ -244,7 +244,7 @@ namespace LiveWall
             var doc = boardDoc;
             var kind = board.Value;
             var date = boardDate;
-            List<InkStroke> strokes = doc.VisibleStrokes();
+            var layers = doc.Snapshot();
             string style = InkRenderer.NormalizeStyle(doc.Background);
             int cw = doc.CanvasWidth, ch = doc.CanvasHeight;
             Size sz = LargestMonitor();
@@ -256,7 +256,7 @@ namespace LiveWall
             string export = doc.Exists ? Boards.ExportPath(kind, date) : null;
             worker.EnqueueLatest("board-render", () =>
             {
-                bool done = InkRenderer.RenderBoardFile(style, strokes, cw, ch, sz.Width, sz.Height, header, seed, path);
+                bool done = InkRenderer.RenderBoardFile(style, layers, cw, ch, sz.Width, sz.Height, header, seed, path);
                 InkText.ClearCache();
                 if (done && export != null)
                 {
@@ -463,7 +463,7 @@ namespace LiveWall
             var doc = InkDocument.Open(path, 1920, 1080, InkDocument.NoBackground, current.Path);
             currentInk = doc;
             if (!settings.ShowWallpaperInk || (editor != null && !editor.IsBoard)) return;
-            List<InkStroke> strokes = doc.VisibleStrokes();
+            List<InkStroke> strokes = doc.ShownStrokes();
             if (strokes.Count == 0) return;
             if (!host.IsValid && !host.Refresh()) return;
             var screens = EnumerateMonitors().Select(m => new InkLayer.Screen { Bounds = m, BoundsInParent = host.ScreenToParent(m) }).ToList();

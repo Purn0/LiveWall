@@ -238,6 +238,23 @@ namespace LiveWall.Ink
             for (int i = 1; i < count; i++) DrawSegment(g, color, width, pts[i - 1], pts[i], m);
         }
 
+        // Only the segments of a freehand stroke that touch `clip` (target pixels), each as the live editor draws it.
+        public static void DrawPointsIn(Graphics g, InkTool tool, int argb, float width, InkPoint[] pts, int count, bool pressure, InkMapping m, Rectangle clip)
+        {
+            if (count <= 1) { DrawPoints(g, tool, argb, width, pts, count, pressure, m); return; }
+            Color color = StrokeColor(tool, argb);
+            float reach = width * 1.7f * m.Scale / 2 + 2;
+            for (int i = 1; i < count; i++)
+            {
+                InkPoint a = pts[i - 1], b = pts[i];
+                PointF pa = m.ToTarget(a.X, a.Y), pb = m.ToTarget(b.X, b.Y);
+                var r = RectangleF.FromLTRB(Math.Min(pa.X, pb.X) - reach, Math.Min(pa.Y, pb.Y) - reach, Math.Max(pa.X, pb.X) + reach, Math.Max(pa.Y, pb.Y) + reach);
+                if (!r.IntersectsWith(clip)) continue;
+                if (!pressure) { a.P = pts[0].P; b.P = pts[0].P; }
+                DrawSegment(g, color, width, a, b, m);
+            }
+        }
+
         public static void DrawSegment(Graphics g, InkTool tool, int argb, float width, InkPoint a, InkPoint b, InkMapping m)
         {
             DrawSegment(g, StrokeColor(tool, argb), width, a, b, m);
@@ -376,7 +393,7 @@ namespace LiveWall.Ink
         // ------------------------------------------------------------------ whole images
 
         // Renders a board (background + strokes) to a PNG file. Runs on the worker thread.
-        public static bool RenderBoardFile(string style, List<InkStroke> strokes, int canvasW, int canvasH, int w, int h,
+        public static bool RenderBoardFile(string style, List<KeyValuePair<InkLayerInfo, List<InkStroke>>> layers, int canvasW, int canvasH, int w, int h,
                                            string header, int seed, string path)
         {
             try
@@ -389,16 +406,8 @@ namespace LiveWall.Ink
                         Prepare(g);
                         var m = InkMapping.Fill(canvasW, canvasH, w, h);
                         DrawBackground(g, style, new Rectangle(0, 0, w, h), m, header, seed);
-                        // The ink on its own layer, so the eraser clears ink and not the board.
-                        using (var ink = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
-                        {
-                            using (var gi = Graphics.FromImage(ink))
-                            {
-                                Prepare(gi);
-                                DrawStrokes(gi, strokes, m);
-                            }
-                            g.DrawImageUnscaled(ink, 0, 0);
-                        }
+                        // The ink on its own layer(s), so the eraser clears ink and not the board.
+                        DrawLayers(g, layers, m, w, h);
                     }
                     string tmp = path + ".part";
                     bmp.Save(tmp, ImageFormat.Png);
@@ -408,6 +417,45 @@ namespace LiveWall.Ink
                 return true;
             }
             catch (Exception ex) { Log.Error("Could not render board", ex); return false; }
+        }
+
+        // Layers bottom to top onto `g` (a w x h target): each drawn on a clear bitmap (erasers clear only their own layer),
+        // then laid over with its opacity. One scratch bitmap, however many layers.
+        public static void DrawLayers(Graphics g, List<KeyValuePair<InkLayerInfo, List<InkStroke>>> layers, InkMapping m, int w, int h)
+        {
+            if (layers.Count == 0) return;
+            using (var scratch = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+                foreach (var kv in layers)
+                {
+                    using (var gs = Graphics.FromImage(scratch))
+                    {
+                        gs.Clear(Color.Transparent);
+                        Prepare(gs);
+                        DrawStrokes(gs, kv.Value, m);
+                    }
+                    DrawWithOpacity(g, scratch, new Rectangle(0, 0, w, h), kv.Key.Opacity);
+                }
+        }
+
+        // `r` of `img` onto the same place of `g`, at `opacity` percent.
+        public static void DrawWithOpacity(Graphics g, Image img, Rectangle r, int opacity)
+        {
+            if (opacity <= 0) return;
+            if (opacity >= 100)
+            {
+                if (r.X == 0 && r.Y == 0 && r.Width == img.Width && r.Height == img.Height) g.DrawImageUnscaled(img, 0, 0);
+                else g.DrawImage(img, r, r, GraphicsUnit.Pixel);
+                return;
+            }
+            // Plain (not gamma-correct) blending, as the editor shows it.
+            var quality = g.CompositingQuality;
+            g.CompositingQuality = CompositingQuality.Default;
+            using (var ia = new ImageAttributes())
+            {
+                ia.SetColorMatrix(new ColorMatrix { Matrix33 = opacity / 100f });
+                g.DrawImage(img, r, r.X, r.Y, r.Width, r.Height, GraphicsUnit.Pixel, ia);
+            }
+            g.CompositingQuality = quality;
         }
 
         // Loads an image without keeping the file locked. Returns null if GDI+ cannot read it.

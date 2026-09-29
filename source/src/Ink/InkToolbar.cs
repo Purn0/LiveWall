@@ -13,7 +13,7 @@ namespace LiveWall.Ink
     // working.
     internal sealed class InkToolbar : Form
     {
-        internal enum Kind { Button, Swatch, Slider, Segment, Separator, Accent, Hint }
+        internal enum Kind { Button, Swatch, Slider, Segment, Separator, Accent, Hint, Label }
 
         internal sealed class Item
         {
@@ -24,6 +24,7 @@ namespace LiveWall.Ink
             public Color Swatch;
             public Action<Graphics, RectangleF, Color> Icon;     // custom-drawn icon instead of a glyph
             public Func<bool> IconWhen;                           // with a glyph too: the icon only while this is true
+            public Func<string> Text;                             // label: its text now
             public bool HasFlyout;                                // small corner mark: more choices on click
             public Func<float> Value;                             // slider 0..1
             public Action<float> SetValue;
@@ -46,6 +47,7 @@ namespace LiveWall.Ink
             { return new Item { Kind = Kind.Segment, Labels = labels, Tip = tip, SegmentSelected = selected, SegmentClick = click }; }
             public static Item Separator() { return new Item { Kind = Kind.Separator }; }
             public static Item Hint(string text) { return new Item { Kind = Kind.Hint, Fallback = text }; }   // small dim text, not clickable
+            public static Item Label(Func<string> text, string tip, Action click) { return new Item { Kind = Kind.Label, Text = text, Tip = tip, Click = click }; }
             public static Item Accent(string glyph, string fallback, string tip, Action click)
             { return new Item { Kind = Kind.Accent, Glyph = glyph, Fallback = fallback, Tip = tip, Click = click }; }
         }
@@ -119,6 +121,7 @@ namespace LiveWall.Ink
                         w = (int)((font != null ? TextRenderer.MeasureText(it.Fallback, font).Width * 0.85f : it.Fallback.Length * 7 * sc) + 14 * sc);
                         break;
                     case Kind.Swatch: w = (int)(30 * sc); break;
+                    case Kind.Label: w = (int)(128 * sc); break;
                     case Kind.Slider: w = (int)(150 * sc); break;
                     case Kind.Segment:
                     {
@@ -238,6 +241,17 @@ namespace LiveWall.Ink
                         TextRenderer.DrawText(g, it.Fallback, f, r, Color.FromArgb(160, 255, 255, 255),
                             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     return;
+                case Kind.Label:
+                {
+                    if (hot) FillRound(g, inner, Color.FromArgb(255, 60, 64, 67));
+                    float s = 16 * scale;
+                    var icon = new RectangleF(r.Left + 8 * scale, cy - s / 2, s, s);
+                    DrawLayersIcon(g, icon, fg);
+                    var tr = Rectangle.FromLTRB((int)(icon.Right + 6 * scale), r.Top, r.Right - (int)(6 * scale), r.Bottom);
+                    TextRenderer.DrawText(g, it.Text(), textFont, tr, fg, TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                                          TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                    return;
+                }
                 case Kind.Swatch:
                 {
                     if (hot) FillRound(g, inner, Color.FromArgb(255, 60, 64, 67));
@@ -341,6 +355,18 @@ namespace LiveWall.Ink
                     }
                 }
             }
+        }
+
+        // Three stacked sheets.
+        public static void DrawLayersIcon(Graphics g, RectangleF r, Color fg)
+        {
+            float cx = r.Left + r.Width / 2, w = r.Width / 2, h = r.Height / 4.2f;
+            using (var p = new Pen(fg, Math.Max(1.2f, r.Width / 12)) { LineJoin = LineJoin.Round })
+                for (int i = 2; i >= 0; i--)
+                {
+                    float cy = r.Top + h + i * h * 0.95f;
+                    g.DrawPolygon(p, new[] { new PointF(cx, cy - h), new PointF(cx + w, cy), new PointF(cx, cy + h), new PointF(cx - w, cy) });
+                }
         }
 
         // The custom color button: current color inside a rainbow ring.
