@@ -330,10 +330,12 @@ namespace LiveWall.Ink
                 int w = Math.Max(1, (int)Math.Ceiling(f.W)), h = Math.Max(1, (int)Math.Ceiling(f.H));
                 img = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
                 using (var g = Graphics.FromImage(img))
+                using (var ia = new ImageAttributes())
                 {
                     g.InterpolationMode = InterpolationMode.HighQualityBilinear;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    g.DrawImage(f.Image, new Rectangle(0, 0, w, h));
+                    ia.SetWrapMode(WrapMode.TileFlipXY);   // no faded border
+                    g.DrawImage(f.Image, new Rectangle(0, 0, w, h), 0, 0, f.Image.Width, f.Image.Height, GraphicsUnit.Pixel, ia);
                 }
                 resampled = true;
             }
@@ -437,25 +439,17 @@ namespace LiveWall.Ink
             DeleteSelection();
         }
 
-        // A picture from the clipboard (copied here or in another app) floats in the middle, ready to place.
+        // A picture from the clipboard (copied here, in another app, or a picture file in File Explorer) floats in the
+        // middle, ready to place. Ctrl+V works with every tool.
         void Paste()
         {
-            Bitmap img = null;
-            try
-            {
-                IDataObject data = Clipboard.GetDataObject();
-                if (data != null && data.GetDataPresent("PNG"))
-                {
-                    var st = data.GetData("PNG") as Stream;
-                    if (st != null) using (var raw = new Bitmap(st)) img = InkImage.ToPArgb(raw);
-                }
-                if (img == null && Clipboard.ContainsImage())
-                    using (Image raw = Clipboard.GetImage()) if (raw != null) img = InkImage.ToPArgb(raw);
-            }
-            catch (Exception ex) { Log.Warn("Paste failed: " + ex.Message); }
+            // Up to twice the screen: sharp when enlarged a little, without holding a whole camera photo in memory.
+            string problem;
+            Bitmap img = InkImage.FromClipboard(Monitor.Width * 2, Monitor.Height * 2, out problem);
             if (img == null)
             {
-                if (toolbar != null && selectItem != null) toolbar.ShowMessage(selectItem, "Nothing to paste: copy a picture or part of a drawing first");
+                if (toolbar != null && selectItem != null)
+                    toolbar.ShowMessage(selectItem, problem ?? "Nothing to paste: copy a picture, a picture file or part of a drawing first");
                 return;
             }
             if (active) End();

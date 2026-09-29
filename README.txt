@@ -44,8 +44,10 @@ Boards and drawing
 - Select: V (press again, or click the select button, for a lasso to draw around any shape). Drag inside it to
   move, the square handles to resize (corners keep the proportions; Shift stretches), the round handle to rotate
   (Shift snaps). The bar under it: cut, copy, delete, rotate left/right, flip. Ctrl+C / Ctrl+X / Ctrl+V,
-  Delete, arrow keys nudge, Ctrl+A selects everything. Paste also takes pictures copied in other apps
-  (e.g. a screenshot). Enter, Esc or clicking outside puts it down; Ctrl+Z before that puts it back.
+  Delete, arrow keys nudge, Ctrl+A selects everything. Ctrl+V works with any tool and also takes pictures copied
+  in other apps (a screenshot, a browser's "Copy image", Paint, Photos) and picture files copied in File Explorer
+  (PNG, JPEG, GIF, BMP, TIFF, and WebP/HEIC/AVIF when Windows can open them). Enter, Esc or clicking outside puts
+  it down; Ctrl+Z before that puts it back.
 - Colors: 1-9, or the rainbow button for any color (color square, RGB, HSV, hex, recent colors). Size: the
   slider, [ and ], or the mouse wheel over the slider. Ctrl+Z / Ctrl+Y undo/redo, Delete clears (undoable),
   B board background, Tab or the Today | Permanent switch changes board, Ctrl+S saves a copy as a picture.
