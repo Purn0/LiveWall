@@ -21,7 +21,8 @@ if ($left.Count -gt 0) {
 if ((Get-Installed).Count -gt 0) { throw 'LiveWall is still running and could not be stopped. Close it from the tray icon and try again.' }
 
 New-Item -ItemType Directory -Force $dest | Out-Null
-Copy-Item (Join-Path $src 'LiveWall.exe'), (Join-Path $src 'LiveWall.exe.config'), (Join-Path $src 'uninstall.ps1'), (Join-Path $src 'README.txt') $dest -Force
+Copy-Item (Join-Path $src 'LiveWall.exe'), (Join-Path $src 'LiveWall.exe.config'), (Join-Path $src 'uninstall.ps1'), (Join-Path $src 'README.md') $dest -Force
+Remove-Item (Join-Path $dest 'README.txt') -ErrorAction SilentlyContinue   # from versions before README.md
 if ((Get-FileHash $exe).Hash -ne (Get-FileHash (Join-Path $src 'LiveWall.exe')).Hash) { throw "The new LiveWall.exe could not be copied to $dest." }
 Write-Host ("Installed LiveWall.exe built " + (Get-Item $exe).LastWriteTime)
 
