@@ -239,25 +239,28 @@ namespace LiveWall
             if (folders.Count > 0) SetCurrentWallpaperMusic(MusicSpec.MakeCustom(folders));
         }
 
-        // From the Music window: its settings, plus (if changed) the music of the wallpaper it was opened for.
-        public void ApplyMusicSettings(MusicSettings m, string wallpaperKey, bool wallpaperChanged, string wallpaperSpec)
+        // From the Settings window's Music tab, plus the per-wallpaper choices made there (wallpaper path or "board" ->
+        // spec, null = the default).
+        public void ApplyMusicSettings(MusicSettings m, IDictionary<string, string> wallpaperChanges)
         {
             MusicSettings old = settings.Music;
-            m.Muted = old.Muted;                 // tray state
+            m.Muted = old.Muted;                 // tray / shortcut state
             m.Moods = old.Moods;                 // found in the background meanwhile
             m.Overrides = old.Overrides;
-            if (wallpaperChanged && wallpaperKey != null)
-            {
-                string hash = MusicSettings.KeyFor(wallpaperKey);
-                if (wallpaperSpec == null || MusicSpec.Kind(wallpaperSpec) == MusicSpec.Default) m.Overrides.Remove(hash);
-                else m.Overrides[hash] = wallpaperSpec;
-            }
+            if (wallpaperChanges != null)
+                foreach (var kv in wallpaperChanges)
+                {
+                    string hash = MusicSettings.KeyFor(kv.Key);
+                    if (kv.Value == null || MusicSpec.Kind(kv.Value) == MusicSpec.Default) m.Overrides.Remove(hash);
+                    else m.Overrides[hash] = kv.Value;
+                }
             settings.Music = m;
             settings.Save();
             musicTracks.Clear();     // look at the folders again when a source is chosen next
             musicFailed.Clear();
             if (m.AskAi != old.AskAi || m.AiKey != old.AiKey || m.AiModel != old.AiModel) moodAiTried.Clear();
             if (music != null && m.Volume != old.Volume) music.SetVolume(m.Volume);
+            if (music != null && m.FadeMs != old.FadeMs) music.SetFade(m.FadeMs);
             if (m.GraceSeconds != old.GraceSeconds && musicGraceRunning) { StopGrace(); }
             if (m.Hotkey != old.Hotkey) RegisterHotkeys();
             Log.Info("Music settings applied (default " + MusicSpec.Describe(m.Default) + ", volume " + m.Volume + ")");
@@ -265,16 +268,10 @@ namespace LiveWall
             UpdateStatus();
         }
 
-        MusicForm musicForm;
+        public void ShowMusicSettings() { ShowSettings(SettingsForm.TabMusic); }
 
-        public void ShowMusicSettings()
-        {
-            if (musicForm != null && !musicForm.IsDisposed) { musicForm.Activate(); return; }
-            musicForm = new MusicForm(this, settings.Music.Clone());
-            musicForm.FormClosed += (s, e) => { musicForm = null; TrimSoon(); };
-            musicForm.Show();
-            musicForm.Activate();
-        }
+        // A wallpaper's own music choice (path or "board"), or null = the default.
+        public string MusicOverrideFor(string wallpaper) { return settings.Music.OverrideFor(wallpaper); }
 
         public string CurrentWallpaperMood
         {
@@ -680,7 +677,7 @@ namespace LiveWall
         {
             try
             {
-                music = new MusicPlayer(window.Handle, settings.Music.Volume, OnMusicExited);
+                music = new MusicPlayer(window.Handle, settings.Music.Volume, settings.Music.FadeMs, OnMusicExited);
                 hostState = HostState.None;
                 hostTrack = null;
                 Log.Info("Music: started the music process (pid " + music.ProcessId + ")");
@@ -959,7 +956,7 @@ namespace LiveWall
             if (prefadeFor != null) return;   // its watchdog is running
             bool songChanges = musicSet.Count > 0 || musicLoopSource;
             DateTime pre = slideshow && songChanges && music != null && hostState == HostState.Playing && musicReason.Length == 0
-                ? slideshowDue.AddMilliseconds(-MusicHost.FadeMs) : DateTime.MinValue;
+                ? slideshowDue.AddMilliseconds(-settings.Music.FadeMs) : DateTime.MinValue;
             ArmAt(TimerMusicPrefade, pre, ref prefadeArmed, 50);
         }
 
@@ -992,7 +989,7 @@ namespace LiveWall
             music.Pause();
             hostState = HostState.Pausing;
             Log.Info("Music: fading out before the wallpaper changes");
-            Native.SetTimer(window.Handle, TimerMusicPrefade, (uint)MusicHost.FadeMs + 2500, IntPtr.Zero);   // watchdog
+            Native.SetTimer(window.Handle, TimerMusicPrefade, (uint)settings.Music.FadeMs + 2500, IntPtr.Zero);   // watchdog
         }
 
         void FinishPrefade()
@@ -1027,7 +1024,6 @@ namespace LiveWall
             foreach (var id in new[] { TimerMusicGrace, TimerMusicMeter, TimerMusicRetry, TimerMusicCheck, TimerMusicPrefade, TimerMusicHalf })
                 Native.KillTimer(window.Handle, id);
             if (frontHook != IntPtr.Zero) { Native.UnhookWinEvent(frontHook); frontHook = IntPtr.Zero; }
-            if (musicForm != null && !musicForm.IsDisposed) musicForm.Close();
             if (music != null) { music.Dispose(); music = null; }
             if (audio != null) { audio.Dispose(); audio = null; }
         }

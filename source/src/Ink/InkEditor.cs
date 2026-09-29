@@ -1071,6 +1071,7 @@ namespace LiveWall.Ink
                 SaveImage, null);
             items.Add(saveItem);
             items.Add(InkToolbar.Item.Accent("\uE73E", "OK", "Done (Esc)", Finish));
+            items.Add(InkToolbar.Item.Hint("Esc = done"));
             return items;
         }
 

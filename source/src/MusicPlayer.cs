@@ -22,7 +22,7 @@ namespace LiveWall
         readonly int processId;
         readonly StreamWriter input;
 
-        public MusicPlayer(IntPtr controller, int volume, Action<MusicPlayer> exited)
+        public MusicPlayer(IntPtr controller, int volume, int fadeMs, Action<MusicPlayer> exited)
         {
             Id = Interlocked.Increment(ref lastId);
             var ci = CultureInfo.InvariantCulture;
@@ -44,6 +44,7 @@ namespace LiveWall
             // Our own UTF-8 writer on the pipe (the default one uses the console code page).
             input = new StreamWriter(process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
             Send("volume\t" + volume.ToString(ci));
+            SetFade(fadeMs);
         }
 
         // Returns the load's sequence number (events from the host name the load they are about).
@@ -59,6 +60,7 @@ namespace LiveWall
         public void Play() { Send("play"); }
         public void Pause() { Send("pause"); }
         public void SetVolume(int volume) { Send("volume\t" + volume.ToString(CultureInfo.InvariantCulture)); }
+        public void SetFade(int fadeMs) { Send("fade\t" + fadeMs.ToString(CultureInfo.InvariantCulture)); }
 
         // A pipe write returns at once (the host reads on its own thread); a dead host just drops the command.
         void Send(string line)

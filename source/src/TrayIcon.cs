@@ -50,18 +50,18 @@ namespace LiveWall
 
         void Rebuild()
         {
+            // Order: what is shown and how to move on; boards, drawing and music; slideshow; the rest. Shortcuts right-aligned.
             menu.MenuItems.Clear();
-            var header = new MenuItem(app.CurrentTitle) { Enabled = false };
+            var header = new MenuItem(app.CurrentTitle.Replace("&", "&&")) { Enabled = false };
             menu.MenuItems.Add(header);
-            menu.MenuItems.Add("-");
             bool several = app.PlayableCount > 1;
             menu.MenuItems.Add(new MenuItem("Next wallpaper", (s, e) => app.Next()) { Enabled = several });
             menu.MenuItems.Add(new MenuItem("Previous wallpaper", (s, e) => app.Previous()) { Enabled = several });
             menu.MenuItems.Add(new MenuItem(app.UserPaused ? "Resume" : "Pause", (s, e) => app.TogglePause()) { Enabled = app.HasLiveWallpaper || app.UserPaused });
             AddCollectionItems();
-            AddMusicItems();
             menu.MenuItems.Add("-");
             AddBoardItems();
+            AddMusicItems();
             menu.MenuItems.Add("-");
 
             var every = new MenuItem("Change every");
@@ -82,7 +82,6 @@ namespace LiveWall
             menu.MenuItems.Add("-");
             menu.MenuItems.Add(new MenuItem("Add wallpapers...", (s, e) => app.AddWallpapersDialog()));
             menu.MenuItems.Add(new MenuItem("Settings...", (s, e) => app.ShowSettings()) { DefaultItem = true });
-            menu.MenuItems.Add("-");
             menu.MenuItems.Add(new MenuItem("Exit LiveWall", (s, e) => app.Exit()));
         }
 

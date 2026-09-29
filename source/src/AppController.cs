@@ -188,19 +188,30 @@ namespace LiveWall
             ApplyFitEverywhere();
         }
 
-        public void ShowSettings()
+        // tab: one of SettingsForm.Tab*, or null = the tab shown last.
+        public void ShowSettings(string tab = null)
         {
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 if (settingsForm.WindowState == FormWindowState.Minimized) settingsForm.WindowState = FormWindowState.Normal;
+                if (tab != null) settingsForm.ShowTab(tab);
                 settingsForm.Activate();
                 return;
             }
-            settingsForm = new SettingsForm(this, settings);
+            settingsForm = new SettingsForm(this, settings, tab ?? settings.SettingsTab);
             settingsForm.FormClosed += (s, e) => { settingsForm = null; TrimSoon(); };
             settingsForm.Show();
             settingsForm.Activate();
             UpdateStatus();
+        }
+
+        // The Settings window's size (96-DPI units) and tab, for next time.
+        public void RememberSettingsWindow(int width, int height, string tab)
+        {
+            settings.SettingsWidth = width;
+            settings.SettingsHeight = height;
+            settings.SettingsTab = tab ?? "";
+            settings.Save();
         }
 
         public void AddWallpapersDialog()
@@ -233,7 +244,10 @@ namespace LiveWall
             s.Collections = old.Collections;          // edited in the Collections window
             s.ActiveCollection = old.ActiveCollection;
             s.UserId = old.UserId;
-            s.Music = old.Music;                      // edited in the Music window and the tray
+            s.Music = old.Music;                      // applied separately (ApplyMusicSettings) and changed from the tray
+            s.SettingsWidth = old.SettingsWidth;
+            s.SettingsHeight = old.SettingsHeight;
+            s.SettingsTab = old.SettingsTab;
             settings = s;
             settings.Save();
 
@@ -882,7 +896,7 @@ namespace LiveWall
             else text = current.Name;
             if (userPaused) paused = true;
             if (tray != null) tray.SetStatus("LiveWall: " + text, MusicPlaying ? MusicTrackTitle : null, paused);
-            if (musicForm != null && !musicForm.IsDisposed) musicForm.RefreshNowPlaying();
+            if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.RefreshNowPlaying();
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 string detail = board != null ? "Showing " + text.Substring(0, 1).ToLowerInvariant() + text.Substring(1) : current == null ? text
@@ -993,6 +1007,7 @@ namespace LiveWall
             Log.Info("Command: " + cmd);
             if (cmd.StartsWith("collection=")) { UseCollection(cmd.Substring(11)); return; }
             if (cmd.StartsWith("music-volume=")) { int v; if (int.TryParse(cmd.Substring(13), out v)) SetMusicVolume(v); return; }
+            if (cmd.StartsWith("settings=")) { ShowSettings(cmd.Substring(9)); return; }   // a tab: wallpapers, slideshow, boards, music, battery, general
             switch (cmd)
             {
                 case "next": Next(); break;

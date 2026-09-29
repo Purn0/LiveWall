@@ -13,7 +13,7 @@ namespace LiveWall.Ink
     // working.
     internal sealed class InkToolbar : Form
     {
-        internal enum Kind { Button, Swatch, Slider, Segment, Separator, Accent }
+        internal enum Kind { Button, Swatch, Slider, Segment, Separator, Accent, Hint }
 
         internal sealed class Item
         {
@@ -44,6 +44,7 @@ namespace LiveWall.Ink
             public static Item Segment(string[] labels, string tip, Func<int> selected, Action<int> click)
             { return new Item { Kind = Kind.Segment, Labels = labels, Tip = tip, SegmentSelected = selected, SegmentClick = click }; }
             public static Item Separator() { return new Item { Kind = Kind.Separator }; }
+            public static Item Hint(string text) { return new Item { Kind = Kind.Hint, Fallback = text }; }   // small dim text, not clickable
             public static Item Accent(string glyph, string fallback, string tip, Action click)
             { return new Item { Kind = Kind.Accent, Glyph = glyph, Fallback = fallback, Tip = tip, Click = click }; }
         }
@@ -113,6 +114,9 @@ namespace LiveWall.Ink
                 switch (it.Kind)
                 {
                     case Kind.Separator: w = (int)(11 * sc); break;
+                    case Kind.Hint:
+                        w = (int)((font != null ? TextRenderer.MeasureText(it.Fallback, font).Width * 0.85f : it.Fallback.Length * 7 * sc) + 14 * sc);
+                        break;
                     case Kind.Swatch: w = (int)(30 * sc); break;
                     case Kind.Slider: w = (int)(150 * sc); break;
                     case Kind.Segment:
@@ -227,6 +231,11 @@ namespace LiveWall.Ink
                 case Kind.Separator:
                     using (var p = new Pen(Color.FromArgb(70, 255, 255, 255), Math.Max(1, scale)))
                         g.DrawLine(p, cx, r.Top + 8 * scale, cx, r.Bottom - 8 * scale);
+                    return;
+                case Kind.Hint:
+                    using (var f = new Font(textFont.FontFamily, textFont.Size * 0.85f, FontStyle.Regular, GraphicsUnit.Pixel))
+                        TextRenderer.DrawText(g, it.Fallback, f, r, Color.FromArgb(160, 255, 255, 255),
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     return;
                 case Kind.Swatch:
                 {
@@ -352,7 +361,8 @@ namespace LiveWall.Ink
 
         int HitTest(Point p)
         {
-            for (int i = 0; i < items.Count; i++) if (items[i].Kind != Kind.Separator && items[i].Rect.Contains(p)) return i;
+            for (int i = 0; i < items.Count; i++)
+                if (items[i].Kind != Kind.Separator && items[i].Kind != Kind.Hint && items[i].Rect.Contains(p)) return i;
             return -1;
         }
 

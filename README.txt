@@ -5,13 +5,19 @@ INSTALL:   double-click "Install LiveWall.cmd"  (no administrator rights needed)
 UNINSTALL: double-click "Uninstall LiveWall.cmd" (also puts your old wallpaper back)
 
 Using it
-- Settings opens after installing. Add videos (MP4, MOV, MKV, WMV...), GIFs or pictures, or whole folders.
-  You can also drag files onto the list.
-- "Change wallpaper every" sets the slideshow interval; "Shuffle" randomises the order. The slideshow waits while
-  you draw on the wallpaper (and starts counting again when you are done) and while the desktop is covered.
-- The notification-area (tray) icon: left-click = Settings, right-click = Next / Previous / Pause / collection /
-  interval / scaling.
+- Settings opens after installing. It has tabs: Wallpapers, Slideshow & scaling, Boards & drawing, Music,
+  Battery & performance and General. It remembers its size and the tab you used last.
+- Wallpapers tab: add videos (MP4, MOV, MKV, WMV...), GIFs or pictures, or whole folders. You can also drag files
+  onto the list. The Music column shows each wallpaper's music; right-click a wallpaper (or double-click it, or
+  Music...) to give it its own music (a folder: every wallpaper in it).
+- Slideshow & scaling tab: "Change wallpaper every" sets the slideshow interval; "Shuffle" randomises the order.
+  The slideshow waits while you draw on the wallpaper (and starts counting again when you are done) and while the
+  desktop is covered.
+- The notification-area (tray) icon: left-click = Settings, right-click = Next / Previous / Pause, Collection,
+  Board / Draw / Drawings on wallpapers, Music, Change every / Shuffle / Scaling, Add wallpapers, Settings, Exit.
 - If you hide the tray icon, start LiveWall from the Start menu to open Settings (it never runs twice).
+- From a shortcut or script: LiveWall.exe --settings=<wallpapers|slideshow|boards|music|battery|general> opens
+  Settings on that tab.
 
 Collections (sets of wallpapers for a theme or mood)
 - Settings > Collections... : New, give it a name, add files, folders or the current wallpaper. The list in
@@ -53,7 +59,7 @@ Boards and drawing
 - Drawing data: %APPDATA%\LiveWall\boards and %APPDATA%\LiveWall\ink (plain text, one line per element).
 
 Music
-- Settings > Music... (or tray icon > Music > Music settings...): music for all wallpapers, and for the one shown:
+- Settings > Music tab (or tray icon > Music > Music settings...): music for all wallpapers, and for the one shown:
   None, Random (shuffles your music folder), By theme (the picture's mood: calm, energetic, dark, happy, dreamy or
   cozy - put music in subfolders with those names; otherwise the whole folder plays), The video's own sound (the
   video wallpaper's soundtrack), or Custom files / a folder. Off (None) until you choose.
@@ -61,8 +67,11 @@ Music
   or asleep, and (settings) while a fullscreen or maximized app is in front (File Explorer, Settings and the desktop
   don't count), on battery or with Energy Saver. A few seconds later the music player closes completely, so the
   sound card and the PC can go idle. When things are quiet again it comes back from the same place with a fade-in.
-  Changing to a wallpaper with other music fades over to it.
-- Ctrl+Alt+M pauses / plays the music and shows the song's name (change it in the Music window). Quiet only because
+  Changing to a wallpaper with other music fades over to it. The fade time, the volume and how long to wait are on
+  the Music tab, with Pause / Next song for what is playing now.
+- Music for other wallpapers: Settings > Wallpapers tab > right-click a wallpaper > Music... (Default, None,
+  Random, By theme, The video's own sound, or files / a folder of your own).
+- Ctrl+Alt+M pauses / plays the music and shows the song's name (change the shortcut on the Music tab). Quiet only because
   of an app in front? Ctrl+Alt+M plays it anyway while that window stays in front. The Start menu also gets
   "LiveWall Music" (same thing): pin it to the taskbar for a one-click music button.
 - With 3 or more wallpapers in a slideshow, each wallpaper gets its own song, repeated (changing every 15 minutes or

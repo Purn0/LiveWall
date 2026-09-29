@@ -46,6 +46,7 @@ namespace LiveWall
     //   play              fade in from the current volume (after a pause, or turning a fade-out around)
     //   pause             fade out, pause, then EVT_PAUSED with the position
     //   volume <0-100>
+    //   fade <ms>         length of fades
     //   exit
     // Host -> controller: WM_MUSIC_EVENT posted to the controller window,
     //   wParam = (event << 24) | playerId, lParam = (seq of the load it is about << 32) | data.
@@ -55,7 +56,7 @@ namespace LiveWall
         public const int EVT_READY = 1, EVT_PLAYING = 2, EVT_PAUSED = 3, EVT_ENDED = 4, EVT_ERROR = 5, EVT_DEVICE = 6;
         public const int ErrNoAudio = 1;   // EVT_ERROR data: the file has no audio stream
         internal const uint WM_ENGINE_EVENT = Native.WM_APP + 50, WM_COMMAND_LINE = Native.WM_APP + 51, WM_EXIT = Native.WM_APP + 52;
-        public const int FadeMs = 1500;
+        static int fadeMs = 1500;              // set by the "fade" command
         const uint FadeTickMs = 30;
         static readonly IntPtr TimerFade = new IntPtr(1);
 
@@ -216,6 +217,9 @@ namespace LiveWall
                 case "volume":
                     if (c.Length >= 2) { target = Math.Max(0, Math.Min(100, int.Parse(c[1], ci))) / 100.0; ApplyVolume(); }
                     break;
+                case "fade":
+                    if (c.Length >= 2) fadeMs = Math.Max(100, Math.Min(10000, int.Parse(c[1], ci)));
+                    break;
                 case "exit": Exit(); break;
             }
         }
@@ -256,7 +260,7 @@ namespace LiveWall
                 SetEcoQos(false);
                 engine.Play();
             }
-            else FadeTo(1, (int)(FadeMs * (1 - level)), null);   // was fading out: turn around
+            else FadeTo(1, (int)(fadeMs * (1 - level)), null);   // was fading out: turn around
         }
 
         static void Pause()
@@ -265,7 +269,7 @@ namespace LiveWall
             fadeInPending = false;
             if (!loaded) { Send(EVT_PAUSED, seq, (int)startMs); return; }   // never started: same position
             if (engine.IsPaused() != 0) { Send(EVT_PAUSED, seq, Position()); return; }
-            FadeTo(0, (int)(FadeMs * level), () =>
+            FadeTo(0, (int)(fadeMs * level), () =>
             {
                 engine.Pause();
                 SetEcoQos(true);
@@ -302,7 +306,7 @@ namespace LiveWall
                 }
                 case MF.EVENT_PLAYING:
                 {
-                    if (fadeInPending) { fadeInPending = false; FadeTo(1, FadeMs, null); }
+                    if (fadeInPending) { fadeInPending = false; FadeTo(1, fadeMs, null); }
                     double dur = engine.GetDuration();
                     Send(EVT_PLAYING, seq, double.IsNaN(dur) || double.IsInfinity(dur) ? 0 : (int)Math.Min(int.MaxValue, dur * 1000));
                     break;

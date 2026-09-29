@@ -69,6 +69,7 @@ namespace LiveWall
         public bool PauseOnFullscreen = true;                // a fullscreen or maximized app in front (not Explorer/Settings)
         public bool PauseOnBattery = false;
         public bool PauseOnEnergySaver = true;
+        public int FadeMs = 1500;                           // fade in / out
         public int GraceSeconds = 8;                        // silent this long: the music process ends
         public int ResumeSeconds = 4;                        // other apps quiet this long: the music comes back
         public bool AskAi = false;                           // online mood tagging (off by default)
@@ -131,6 +132,10 @@ namespace LiveWall
         public string UserId = "";                           // author id stored with each stroke (for shared boards later)
 
         public MusicSettings Music = new MusicSettings();
+
+        // The Settings window: size in 96-DPI units (0 = default) and the tab shown last.
+        public int SettingsWidth, SettingsHeight;
+        public string SettingsTab = "";
 
         // The user's Windows wallpaper before LiveWall first changed it (used by "restore").
         public bool OriginalCaptured;
@@ -204,7 +209,15 @@ namespace LiveWall
                         case "musicPauseOnFullscreen": s.Music.PauseOnFullscreen = v == "1"; break;
                         case "musicPauseOnBattery": s.Music.PauseOnBattery = v == "1"; break;
                         case "musicPauseOnEnergySaver": s.Music.PauseOnEnergySaver = v == "1"; break;
+                        case "musicFadeMs": s.Music.FadeMs = Math.Max(200, Math.Min(10000, ParseInt(v, 1500))); break;
                         case "musicGraceSeconds": s.Music.GraceSeconds = Math.Max(1, Math.Min(600, ParseInt(v, 8))); break;
+                        case "settingsWindow":
+                        {
+                            string[] wh = v.Split('x');
+                            if (wh.Length == 2) { s.SettingsWidth = ParseInt(wh[0], 0); s.SettingsHeight = ParseInt(wh[1], 0); }
+                            break;
+                        }
+                        case "settingsTab": s.SettingsTab = v; break;
                         case "musicResumeSeconds": s.Music.ResumeSeconds = Math.Max(1, Math.Min(600, ParseInt(v, 4))); break;
                         case "musicAskAi": s.Music.AskAi = v == "1"; break;
                         case "musicAiKey": s.Music.AiKey = v; break;
@@ -250,6 +263,9 @@ namespace LiveWall
             sb.AppendLine("originalCaptured=" + B(OriginalCaptured));
             sb.AppendLine("originalWallpaper=" + OriginalWallpaper);
             sb.AppendLine("originalPosition=" + OriginalPosition.ToString(CultureInfo.InvariantCulture));
+            if (SettingsWidth > 0 && SettingsHeight > 0)
+                sb.AppendLine("settingsWindow=" + SettingsWidth.ToString(CultureInfo.InvariantCulture) + "x" + SettingsHeight.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("settingsTab=" + SettingsTab);
             var m = Music;
             sb.AppendLine("musicDefault=" + m.Default);
             sb.AppendLine("musicFolder=" + m.Folder);
@@ -260,6 +276,7 @@ namespace LiveWall
             sb.AppendLine("musicPauseOnFullscreen=" + B(m.PauseOnFullscreen));
             sb.AppendLine("musicPauseOnBattery=" + B(m.PauseOnBattery));
             sb.AppendLine("musicPauseOnEnergySaver=" + B(m.PauseOnEnergySaver));
+            sb.AppendLine("musicFadeMs=" + m.FadeMs.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("musicGraceSeconds=" + m.GraceSeconds.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("musicResumeSeconds=" + m.ResumeSeconds.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("musicAskAi=" + B(m.AskAi));
