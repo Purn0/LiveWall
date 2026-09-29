@@ -39,6 +39,7 @@ namespace LiveWall.Ink
         public readonly string Text, Font, Effect;
         public readonly bool Bold, Italic;
         public readonly string Base;         // element this one replaces: it takes that one's place in the drawing order
+        public readonly string Under;        // element this one is drawn just below (a fill under later highlighters and pens)
         public readonly string Data;         // images: PNG, base64
         RectangleF bounds;
         bool boundsKnown;
@@ -47,11 +48,13 @@ namespace LiveWall.Ink
             : this(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null, null) { }
 
         InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, bool filled,
-                  InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId, string data)
+                  InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId, string data,
+                  string under = null)
         {
             Id = id; Author = author; Ticks = ticks; Tool = tool; Argb = argb; Width = Math.Max(0.5f, width);
             Points = points ?? new InkPoint[0];
             Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId; Data = data;
+            Under = under;
             if (tool == InkTool.Pen || tool == InkTool.Highlighter)
             {
                 byte first = Points.Length > 0 ? Points[0].P : (byte)128;
@@ -64,10 +67,11 @@ namespace LiveWall.Ink
             return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null, null);
         }
 
-        public static InkStroke FillRegion(string id, string author, long ticks, int argb, InkFill.Mask mask)
+        // `under`: an element to draw it just below (null = on top).
+        public static InkStroke FillRegion(string id, string author, long ticks, int argb, InkFill.Mask mask, string under = null)
         {
             return new InkStroke(id, author, ticks, InkTool.Fill, argb, 1, new[] { new InkPoint(mask.Left, mask.Top, 128) }, false, mask,
-                                 null, null, false, false, null, null, null);
+                                 null, null, false, false, null, null, null, under);
         }
 
         // `replaces`: the text this edits (the new one takes its place in the drawing order).
@@ -84,9 +88,10 @@ namespace LiveWall.Ink
             return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data);
         }
 
-        InkStroke WithBase(string baseId)
+        InkStroke WithOrder(string baseId, string under)
         {
-            return baseId == null ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data);
+            return baseId == null && under == null ? this
+                : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data, under);
         }
 
         // Clears the area inside the outline (canvas units).
@@ -264,6 +269,7 @@ namespace LiveWall.Ink
             }
             if (Tool == InkTool.Image) sb.Append(" img=").Append(Data ?? "");
             if (Base != null) sb.Append(" z=").Append(Base);
+            if (Under != null) sb.Append(" under=").Append(Under);
             return sb.ToString();
         }
 
@@ -271,8 +277,13 @@ namespace LiveWall.Ink
         {
             InkStroke s = ParseElement(f);
             if (s == null) return null;
-            for (int i = 8; i < f.Length; i++) if (f[i].StartsWith("z=")) return s.WithBase(f[i].Substring(2));
-            return s;
+            string baseId = null, under = null;
+            for (int i = 8; i < f.Length; i++)
+            {
+                if (f[i].StartsWith("z=")) baseId = f[i].Substring(2);
+                else if (f[i].StartsWith("under=")) under = f[i].Substring(6);
+            }
+            return s.WithOrder(baseId, under);
         }
 
         static InkStroke ParseElement(string[] f)
@@ -348,6 +359,8 @@ namespace LiveWall.Ink
     //       erase (width = eraser diameter; clears everything drawn before it along its path; "+fill" = the area inside);
     //       image (three corners: top-left, top-right, bottom-left; img=<PNG in base64>)
     //       optional z=<id>: replaces that element and takes its place in the drawing order (recolor, edited text)
+    //       optional under=<id>: drawn just below that element (a fill goes under the highlighters and pens drawn after
+    //       the last fill or eraser it overlaps); older versions ignore it and draw the element on top
     //   - <id> <author> <ticks>         erase a stroke
     //   ~ <id> <author> <ticks>         restore an erased stroke (undo of an erase)
     // Each stroke has a globally unique id and never changes, so logs from several people can simply be merged.
@@ -417,11 +430,14 @@ namespace LiveWall.Ink
             return doc;
         }
 
-        // In drawing order: after the element it replaces (so erasing drawn later still applies to it), else on top.
+        // In drawing order: after the element it replaces (so erasing drawn later still applies to it), just below the one
+        // it goes under, else on top.
         void Insert(InkStroke s)
         {
-            InkStroke replaced;
-            int at = s.Base != null && byId.TryGetValue(s.Base, out replaced) ? strokes.IndexOf(replaced) + 1 : strokes.Count;
+            InkStroke other;
+            int at = strokes.Count;
+            if (s.Base != null && byId.TryGetValue(s.Base, out other)) at = strokes.IndexOf(other) + 1;
+            else if (s.Under != null && byId.TryGetValue(s.Under, out other)) at = strokes.IndexOf(other);
             strokes.Insert(at, s);
             byId[s.Id] = s;
         }

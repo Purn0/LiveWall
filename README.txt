@@ -39,7 +39,9 @@ Boards and drawing
 - Tools: P pen, H highlighter, E eraser (or the pen's eraser end / right mouse button; it erases only what it
   touches - press E again, or click the eraser button, for "whole strokes"), shapes (L line, A arrow,
   R rectangle, O ellipse; Shift = straight / square / circle; the shapes button also switches filled shapes),
-  F fill (click inside a closed area; click a line or shape to recolor it), T text with emoji / kaomoji /
+  F fill (click inside an area closed by lines, shapes or text; highlighter doesn't stop it and stays visible on
+  top; click the fill button again to choose how big a gap in an outline it closes; click a line or shape to
+  recolor it), T text with emoji / kaomoji /
   symbols tabs (or Windows' own panel, Win + .), I eyedropper. Click text again to change it.
 - Select: V (press again, or click the select button, for a lasso to draw around any shape). Drag inside it to
   move, the square handles to resize (corners keep the proportions; Shift stretches), the round handle to rotate

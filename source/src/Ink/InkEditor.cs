@@ -35,6 +35,7 @@ namespace LiveWall.Ink
         static string textFont = "Segoe UI", textEffect = InkText.Plain;
         static int textTab;
         static bool eraseWhole;         // eraser removes whole strokes (instead of only what it touches)
+        static int fillGap = 1;         // FillGaps index
 
         const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
 
@@ -603,8 +604,10 @@ namespace LiveWall.Ink
             Cursor = Cursors.WaitCursor;
             try
             {
-                // Earlier fills don't block a new one (so an outline drawn on a filled area can still be filled).
-                var blockers = Rendered.Where(s => s.Tool != InkTool.Fill).ToList();
+                // Solid ink only: earlier fills don't block a new one (so an outline drawn on a filled area can still be
+                // filled) and highlighters don't either (the fill goes under them).
+                var order = Rendered.ToList();
+                var blockers = order.Where(s => s.Tool != InkTool.Fill && s.Tool != InkTool.Highlighter).ToList();
                 var ink = new bool[w * h];
                 using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
                 {
@@ -620,7 +623,7 @@ namespace LiveWall.Ink
                         for (int y = 0; y < h; y++)
                         {
                             Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, w);
-                            for (int x = 0; x < w; x++) ink[y * w + x] = ((row[x] >> 24) & 0xFF) >= 64;
+                            for (int x = 0; x < w; x++) ink[y * w + x] = ((row[x] >> 24) & 0xFF) >= FillInkAlpha;
                         }
                     }
                     finally { bmp.UnlockBits(data); }
@@ -633,10 +636,30 @@ namespace LiveWall.Ink
                         AddElement(hit.Recolored(NewId(), author, DateTime.UtcNow.Ticks, color), hit, Rectangle.Empty);
                     return;
                 }
-                var mask = InkFill.Flood(ink, w, h, sx, sy);
-                if (mask != null) AddElement(InkStroke.FillRegion(NewId(), author, DateTime.UtcNow.Ticks, color, mask), null, Rectangle.Empty);
+                var mask = InkFill.Flood(ink, w, h, sx, sy, FillGap);
+                if (mask != null) AddElement(InkStroke.FillRegion(NewId(), author, DateTime.UtcNow.Ticks, color, mask, FillUnder(order, mask)), null, Rectangle.Empty);
             }
             finally { UpdateCursor(); }
+        }
+
+        // Faint anti-aliased edges don't block a fill: the gap closing takes care of thin lines.
+        const int FillInkAlpha = 40;
+        static readonly float[] FillGaps = { 1, 2, 5 };   // canvas pixels at 1080p: exact, small gaps (default), bigger gaps
+
+        int FillGap { get { return Math.Max(1, (int)Math.Round(FillGaps[fillGap] * unit)); } }
+
+        // A new fill goes above the fills and eraser marks it overlaps (a new color on an old fill wins; an old eraser mark
+        // doesn't cut it) and below everything drawn after them there: highlighters keep their look on top, and lines stay
+        // crisp over the fill's edge. Null = on top.
+        static string FillUnder(List<InkStroke> order, InkFill.Mask mask)
+        {
+            var area = new RectangleF(mask.Left, mask.Top, mask.Width, mask.Height);
+            int floor = -1;
+            for (int i = 0; i < order.Count; i++)
+                if ((order[i].Tool == InkTool.Fill || order[i].Tool == InkTool.Erase) && order[i].Bounds.IntersectsWith(area)) floor = i;
+            for (int i = floor + 1; i < order.Count; i++)
+                if (order[i].Tool != InkTool.Erase && order[i].Bounds.IntersectsWith(area)) return order[i].Id;
+            return null;
         }
 
         void PickColor(Point client)
@@ -1040,7 +1063,13 @@ namespace LiveWall.Ink
                 () => tool == EditorTool.Shape);
             shapes.HasFlyout = true;
             items.Add(shapes);
-            items.Add(InkToolbar.Item.Button("\uEB42", "F", "Fill: click inside a closed area to fill it, or on a line or shape to recolor it (F)", () => SetTool(EditorTool.Fill), () => tool == EditorTool.Fill));
+            InkToolbar.Item fill = null;
+            fill = InkToolbar.Item.Button("\uEB42", "F", "Fill: click inside an area closed by lines, shapes or text to fill it (it goes under highlighter), " +
+                "or on a line or shape to recolor it (F). Click again: how big a gap in an outline it may close.",
+                () => { SetTool(EditorTool.Fill); if (toolbar.FlyoutOpen) toolbar.CloseFlyout(); else toolbar.ShowFlyout(fill, BuildFillFlyout()); },
+                () => tool == EditorTool.Fill);
+            fill.HasFlyout = true;
+            items.Add(fill);
             items.Add(InkToolbar.Item.Button("\uE8D2", "T", "Text, emoji, kaomoji and symbols: click where they go; click text to change it (T)",
                 () => SetTool(EditorTool.Text), () => tool == EditorTool.Text));
             items.Add(InkToolbar.Item.Button("\uEF3C", "I", "Eyedropper: pick a color from the drawing (I)", UsePicker, () => tool == EditorTool.Picker));
@@ -1092,6 +1121,16 @@ namespace LiveWall.Ink
             selectShape = selectShape == SelectShape.Lasso ? SelectShape.Rectangle : SelectShape.Lasso;
             RefreshToolbar();
             if (toolbar != null && selectItem != null) toolbar.ShowMessage(selectItem, selectShape == SelectShape.Lasso ? "Select: lasso (draw around it)" : "Select: rectangle");
+        }
+
+        List<InkToolbar.Item> BuildFillFlyout()
+        {
+            return new List<InkToolbar.Item>
+            {
+                InkToolbar.Item.Segment(new[] { "Exact", "Close small gaps", "Close gaps" },
+                    "How big a gap in an outline the fill jumps (a circle that doesn't quite close still fills)",
+                    () => fillGap, i => { fillGap = i; SetTool(EditorTool.Fill); toolbar.CloseFlyout(); })
+            };
         }
 
         List<InkToolbar.Item> BuildEraserFlyout()

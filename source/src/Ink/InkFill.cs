@@ -9,8 +9,8 @@ using System.Text;
 
 namespace LiveWall.Ink
 {
-    // Paint-bucket fills: the area around a point that is enclosed by ink (backgrounds and wallpapers don't stop it),
-    // kept as a region so it looks the same at any screen size.
+    // Paint-bucket fills: the area around a point that is enclosed by solid ink (pens, shapes, text, pictures; not
+    // highlighters, earlier fills, backgrounds or wallpapers), kept as a region so it looks the same at any screen size.
     internal static class InkFill
     {
         // A region in canvas pixels: per row, runs of [start, end) relative to Left.
@@ -103,55 +103,147 @@ namespace LiveWall.Ink
             }
         }
 
-        // `ink`: per canvas pixel, true where drawing blocks the fill. Returns null when (sx, sy) is on ink.
-        public static Mask Flood(bool[] ink, int w, int h, int sx, int sy)
+        // `ink`: per canvas pixel, true where solid drawing blocks the fill. `gap` (canvas pixels, 0 = none): the flood runs
+        // on the ink grown by that much, so gaps in an outline up to about twice as wide are closed and thin anti-aliased
+        // lines can't leak; the result then grows back by `gap` (never across a line) to meet the ink. Returns null when
+        // (sx, sy) is on ink.
+        public static Mask Flood(bool[] ink, int w, int h, int sx, int sy, int gap)
         {
             if (sx < 0 || sy < 0 || sx >= w || sy >= h || ink[sy * w + sx]) return null;
-            var filled = new bool[w * h];
-            var stack = new Stack<int>();
-            stack.Push(sy * w + sx);
-            int minX = sx, maxX = sx, minY = sy, maxY = sy;
-            while (stack.Count > 0)
+            int start = sy * w + sx;
+            bool[] blocked = ink;
+            if (gap > 0)
             {
-                int i = stack.Pop();
-                if (filled[i] || ink[i]) continue;
-                int y = i / w, x0 = i % w, x1 = x0;
-                while (x0 > 0 && !ink[y * w + x0 - 1] && !filled[y * w + x0 - 1]) x0--;
-                while (x1 < w - 1 && !ink[y * w + x1 + 1] && !filled[y * w + x1 + 1]) x1++;
-                for (int x = x0; x <= x1; x++) filled[y * w + x] = true;
-                if (x0 < minX) minX = x0; if (x1 > maxX) maxX = x1;
-                if (y < minY) minY = y; if (y > maxY) maxY = y;
-                foreach (int ny in new[] { y - 1, y + 1 })
+                blocked = Dilate(ink, w, h, gap, new Rectangle(0, 0, w, h));
+                if (blocked[start])
                 {
-                    if (ny < 0 || ny >= h) continue;
-                    bool open = false;
-                    for (int x = x0; x <= x1; x++)
-                    {
-                        int j = ny * w + x;
-                        bool free = !ink[j] && !filled[j];
-                        if (free && !open) stack.Push(j);
-                        open = free;
-                    }
+                    // Clicked close to a line: start from the nearest open pixel on this side of it, or (a sliver narrower
+                    // than the gap) fill without closing gaps.
+                    int open = NearestOpen(ink, blocked, w, h, start, 2 * gap + 2);
+                    if (open >= 0) start = open;
+                    else { blocked = ink; gap = 0; }
                 }
             }
+            Rectangle box;
+            bool[] filled = FloodFrom(blocked, w, h, start, out box);
+            if (gap > 0)
+            {
+                box = Rectangle.Intersect(Rectangle.Inflate(box, gap, gap), new Rectangle(0, 0, w, h));
+                filled = Dilate(filled, w, h, gap, box);
+            }
             // One pixel wider into the surrounding ink, so no gap shows along anti-aliased edges.
-            minX = Math.Max(0, minX - 1); minY = Math.Max(0, minY - 1); maxX = Math.Min(w - 1, maxX + 1); maxY = Math.Min(h - 1, maxY + 1);
+            int minX = Math.Max(0, box.Left - 1), minY = Math.Max(0, box.Top - 1), maxX = Math.Min(w - 1, box.Right), maxY = Math.Min(h - 1, box.Bottom);
             var m = new Mask { Left = minX, Top = minY, Width = maxX - minX + 1, Height = maxY - minY + 1 };
             m.Rows = new int[m.Height][];
             var runs = new List<int>();
             for (int y = minY; y <= maxY; y++)
             {
                 runs.Clear();
-                int start = -1;
+                int from = -1;
                 for (int x = minX; x <= maxX + 1; x++)
                 {
                     bool on = x <= maxX && Grown(filled, w, h, x, y);
-                    if (on && start < 0) start = x;
-                    else if (!on && start >= 0) { runs.Add(start - minX); runs.Add(x - minX); start = -1; }
+                    if (on && from < 0) from = x;
+                    else if (!on && from >= 0) { runs.Add(from - minX); runs.Add(x - minX); from = -1; }
                 }
                 m.Rows[y - minY] = runs.ToArray();
             }
             return m;
+        }
+
+        // Scanline flood over the pixels that aren't blocked; `box` = the filled area's bounds.
+        static bool[] FloodFrom(bool[] blocked, int w, int h, int start, out Rectangle box)
+        {
+            var filled = new bool[w * h];
+            var stack = new Stack<int>();
+            stack.Push(start);
+            int minX = start % w, maxX = minX, minY = start / w, maxY = minY;
+            var rows = new int[2];
+            while (stack.Count > 0)
+            {
+                int i = stack.Pop();
+                if (filled[i] || blocked[i]) continue;
+                int y = i / w, x0 = i % w, x1 = x0;
+                while (x0 > 0 && !blocked[y * w + x0 - 1] && !filled[y * w + x0 - 1]) x0--;
+                while (x1 < w - 1 && !blocked[y * w + x1 + 1] && !filled[y * w + x1 + 1]) x1++;
+                for (int x = x0; x <= x1; x++) filled[y * w + x] = true;
+                if (x0 < minX) minX = x0; if (x1 > maxX) maxX = x1;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+                rows[0] = y - 1;
+                rows[1] = y + 1;
+                foreach (int ny in rows)
+                {
+                    if (ny < 0 || ny >= h) continue;
+                    bool open = false;
+                    for (int x = x0; x <= x1; x++)
+                    {
+                        int j = ny * w + x;
+                        bool free = !blocked[j] && !filled[j];
+                        if (free && !open) stack.Push(j);
+                        open = free;
+                    }
+                }
+            }
+            box = Rectangle.FromLTRB(minX, minY, maxX + 1, maxY + 1);
+            return filled;
+        }
+
+        // A copy of `src` grown by r pixels in every direction (a square), computed only inside `area`.
+        static bool[] Dilate(bool[] src, int w, int h, int r, Rectangle area)
+        {
+            var dst = new bool[w * h];
+            var tmp = new bool[w * h];
+            int x0 = area.Left, x1 = area.Right;
+            var prefix = new int[w + 1];
+            // Across: tmp = any src within r to the left or right (rows the second pass reads).
+            for (int y = Math.Max(0, area.Top - r); y < Math.Min(h, area.Bottom + r); y++)
+            {
+                int row = y * w, from = Math.Max(0, x0 - r), to = Math.Min(w, x1 + r);
+                for (int x = from; x < to; x++) prefix[x + 1] = prefix[x] + (src[row + x] ? 1 : 0);
+                for (int x = x0; x < x1; x++) tmp[row + x] = prefix[Math.Min(to, x + r + 1)] - prefix[Math.Max(from, x - r)] > 0;
+            }
+            // Down: a sliding window of 2r+1 rows, counted per column.
+            var count = new int[w];
+            for (int y = Math.Max(0, area.Top - r); y < Math.Min(h, area.Top + r); y++) AddRow(tmp, count, y * w, x0, x1, 1);
+            for (int y = area.Top; y < area.Bottom; y++)
+            {
+                if (y + r < h) AddRow(tmp, count, (y + r) * w, x0, x1, 1);
+                int row = y * w;
+                for (int x = x0; x < x1; x++) dst[row + x] = count[x] > 0;
+                if (y - r >= 0) AddRow(tmp, count, (y - r) * w, x0, x1, -1);
+            }
+            return dst;
+        }
+
+        static void AddRow(bool[] b, int[] count, int row, int x0, int x1, int d)
+        {
+            for (int x = x0; x < x1; x++) if (b[row + x]) count[x] += d;
+        }
+
+        // The nearest pixel that isn't blocked, reached without crossing ink (4-neighbour steps), or -1.
+        static int NearestOpen(bool[] ink, bool[] blocked, int w, int h, int start, int maxSteps)
+        {
+            var seen = new HashSet<int> { start };
+            var ring = new List<int> { start };
+            for (int step = 0; step < maxSteps && ring.Count > 0; step++)
+            {
+                var next = new List<int>();
+                foreach (int i in ring)
+                {
+                    int x = i % w, y = i / w;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int nx = x + (k == 0 ? -1 : k == 1 ? 1 : 0), ny = y + (k == 2 ? -1 : k == 3 ? 1 : 0);
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        int j = ny * w + nx;
+                        if (ink[j] || !seen.Add(j)) continue;
+                        if (!blocked[j]) return j;
+                        next.Add(j);
+                    }
+                }
+                ring = next;
+            }
+            return -1;
         }
 
         static bool Grown(bool[] f, int w, int h, int x, int y)

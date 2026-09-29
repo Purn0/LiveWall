@@ -11,11 +11,12 @@ namespace LiveWall.Ink
 {
     // Shows a wallpaper's drawings behind the desktop icons, above the wallpaper (picture or video).
     //
-    // Per screen, small color-keyed layered child windows sized to just the drawn area: one for pens (opaque) and one
-    // for highlighters (constant alpha). Painted once from a cached bitmap; the compositor keeps the pixels, so they
-    // cost nothing while shown. (Per-pixel-alpha children, i.e. UpdateLayeredWindow, are never drawn under Progman on
-    // Windows 11 24H2+; color key and constant alpha are.) A color key has no partial transparency, so pen edges are
-    // pre-blended with the wallpaper's picture (a video's first frame) to stay smooth.
+    // Per screen, small color-keyed layered child windows sized to just the drawn area, top to bottom: pens, shapes, text
+    // and pictures (opaque); highlighters (constant alpha); fills (opaque; under the highlighters, as in the editor).
+    // Painted once from a cached bitmap; the compositor keeps the pixels, so they cost nothing while shown.
+    // (Per-pixel-alpha children, i.e. UpdateLayeredWindow, are never drawn under Progman on Windows 11 24H2+; color key
+    // and constant alpha are.) A color key has no partial transparency, so opaque edges are pre-blended with what shows
+    // beneath them (the wallpaper's picture or a video's first frame, and the windows below) to stay smooth.
     // The windows live on their own idle thread: a child of Explorer's desktop window ties its thread's input queue to
     // Explorer's, and that must never be LiveWall's UI thread.
     internal sealed class InkLayer : IDisposable
@@ -211,7 +212,7 @@ namespace LiveWall.Ink
             return Native.DefWindowProc(hwnd, msg, wParam, lParam);
         }
 
-        // The pen window, then (below it) the highlighter window, for one screen.
+        // The pen window, then (below it) the highlighter window, then the fill window, for one screen.
         List<IntPtr> CreateLayers(IntPtr parent, IntPtr insertAfter, Screen s, List<InkStroke> strokes, int canvasW, int canvasH,
                                   Bitmap picture, FitMode fit)
         {
@@ -219,23 +220,53 @@ namespace LiveWall.Ink
             int w = s.Bounds.Width, h = s.Bounds.Height;
             if (w <= 0 || h <= 0 || !Native.IsWindow(parent)) return made;
             var m = InkMapping.Fill(canvasW, canvasH, w, h);
-            // Eraser paths go with both (they clear whatever was drawn before them) but don't make a window bigger.
-            var pens = strokes.Where(st => st.Tool != InkTool.Highlighter).ToList();
+            // Eraser paths go with each (they clear whatever was drawn before them) but don't make a window bigger.
+            var pens = strokes.Where(st => st.Tool != InkTool.Highlighter && st.Tool != InkTool.Fill).ToList();
             var highlights = strokes.Where(st => st.Tool == InkTool.Highlighter || st.Tool == InkTool.Erase).ToList();
+            var fills = strokes.Where(st => st.Tool == InkTool.Fill || st.Tool == InkTool.Erase).ToList();
+            Rectangle penCrop = Crop(pens, m, w, h), highlightCrop = Crop(highlights, m, w, h), fillCrop = Crop(fills, m, w, h);
             IntPtr after = insertAfter;
-            Rectangle crop = Crop(pens, m, w, h);
-            if (!crop.IsEmpty)
+            if (!penCrop.IsEmpty)
             {
-                IntPtr hwnd = CreateLayer(parent, after, s, crop, RenderPens(pens, m, crop, picture, fit, w, h), 255);
+                int[] px;
+                using (Bitmap below = Beneath(penCrop, picture, fit, w, h, fills, highlights, m)) px = RenderOpaque(pens, m, penCrop, below);
+                IntPtr hwnd = CreateLayer(parent, after, s, penCrop, px, 255);
                 if (hwnd != IntPtr.Zero) { made.Add(hwnd); after = hwnd; }
             }
-            crop = Crop(highlights, m, w, h);
-            if (!crop.IsEmpty)
+            if (!highlightCrop.IsEmpty)
             {
-                IntPtr hwnd = CreateLayer(parent, after, s, crop, RenderHighlights(highlights, m, crop), InkRenderer.HighlighterAlpha);
+                IntPtr hwnd = CreateLayer(parent, after, s, highlightCrop, RenderHighlights(highlights, m, highlightCrop), InkRenderer.HighlighterAlpha);
+                if (hwnd != IntPtr.Zero) { made.Add(hwnd); after = hwnd; }
+            }
+            if (!fillCrop.IsEmpty)
+            {
+                int[] px;
+                using (Bitmap below = Beneath(fillCrop, picture, fit, w, h, null, null, m)) px = RenderOpaque(fills, m, fillCrop, below);
+                IntPtr hwnd = CreateLayer(parent, after, s, fillCrop, px, 255);
                 if (hwnd != IntPtr.Zero) made.Add(hwnd);
             }
             return made;
+        }
+
+        // What shows beneath a window (cropped): the wallpaper's picture, then the fills and highlighters (if given). Null
+        // when there is nothing (no picture and no drawing below).
+        static Bitmap Beneath(Rectangle crop, Bitmap picture, FitMode fit, int screenW, int screenH, List<InkStroke> fills,
+                               List<InkStroke> highlights, InkMapping m)
+        {
+            bool anyFill = fills != null && fills.Any(st => st.Tool == InkTool.Fill);
+            bool anyHighlight = highlights != null && highlights.Any(st => st.Tool == InkTool.Highlighter);
+            if (picture == null && !anyFill && !anyHighlight) return null;
+            var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                InkRenderer.Prepare(g);
+                g.TranslateTransform(-crop.Left, -crop.Top);
+                if (picture != null) InkRenderer.DrawPicture(g, picture, new Rectangle(0, 0, screenW, screenH), fit);
+                g.ResetTransform();
+                if (anyFill) using (Bitmap layer = RenderStrokes(fills, m, crop, false)) g.DrawImageUnscaled(layer, 0, 0);
+                if (anyHighlight) using (Bitmap layer = RenderStrokes(highlights, m, crop, false)) g.DrawImageUnscaled(layer, 0, 0);
+            }
+            return bmp;
         }
 
         // Only as big as the drawing: less memory, and less for the compositor to blend while a video plays underneath.
@@ -274,31 +305,28 @@ namespace LiveWall.Ink
             return hwnd;
         }
 
-        // Pens: solid ink, and its anti-aliased edges blended with the wallpaper underneath (hard edges without one).
-        static int[] RenderPens(List<InkStroke> strokes, InkMapping m, Rectangle crop, Bitmap picture, FitMode fit, int screenW, int screenH)
+        // Pens (or fills): solid, and their anti-aliased edges blended with what shows beneath (`below`, may be null);
+        // hard edges where nothing opaque is beneath.
+        static int[] RenderOpaque(List<InkStroke> strokes, InkMapping m, Rectangle crop, Bitmap below)
         {
-            int[] ink, blended = null;
+            int[] ink, under = null, blended = null;
             using (Bitmap layer = RenderStrokes(strokes, m, crop, false))
             {
                 ink = Pixels(layer);
-                if (picture != null)
-                    using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppPArgb))
+                if (below != null)
+                {
+                    under = Pixels(below);
+                    using (var bmp = new Bitmap(below))
                     {
-                        using (var g = Graphics.FromImage(bmp))
-                        {
-                            InkRenderer.Prepare(g);
-                            g.TranslateTransform(-crop.Left, -crop.Top);
-                            InkRenderer.DrawPicture(g, picture, new Rectangle(0, 0, screenW, screenH), fit);
-                            g.ResetTransform();
-                            g.DrawImageUnscaled(layer, 0, 0);
-                        }
+                        using (var g = Graphics.FromImage(bmp)) g.DrawImageUnscaled(layer, 0, 0);
                         blended = Pixels(bmp);
                     }
+                }
             }
             for (int i = 0; i < ink.Length; i++)
             {
                 int a = (ink[i] >> 24) & 0xFF;
-                if (blended != null) ink[i] = a < 24 ? KeyArgb : NotKey(blended[i] | unchecked((int)0xFF000000));
+                if (blended != null && ((under[i] >> 24) & 0xFF) == 255) ink[i] = a < 24 ? KeyArgb : NotKey(blended[i] | unchecked((int)0xFF000000));
                 else ink[i] = a < 128 ? KeyArgb : NotKey(Unpremultiply(ink[i]));
             }
             return ink;
