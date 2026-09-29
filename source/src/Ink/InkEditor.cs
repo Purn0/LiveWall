@@ -38,13 +38,15 @@ namespace LiveWall.Ink
         static bool eraseWhole;         // eraser removes whole strokes (instead of only what it touches)
         static int fillGap = 1;         // FillGaps index
         static string penBrush = InkBrush.Pen;
+        static int penSpread = 100;     // percent: spray scatter, airbrush softness, neon glow width
+        static int glowDim = InkGlow.DefaultDim;
         static bool fillAllLayers;      // fill boundaries from every shown layer, not just the active one
         static bool glowOn;             // new pen strokes, shapes and text glow (G)
         static int glowStrength = 60, glowSpeed = 2;
         static string glowAnim = InkGlow.Steady;
         static readonly Dictionary<string, string> lastLayer = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // board file -> layer
 
-        const float PenMin = 1, PenMax = 60, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
+        const float PenMin = 1, PenMax = 200, HighlighterMin = 6, HighlighterMax = 120, EraserMin = 5, EraserMax = 150, TextMin = 10, TextMax = 300;
 
         public readonly InkDocument Document;
         public readonly bool IsBoard;
@@ -81,6 +83,8 @@ namespace LiveWall.Ink
         readonly List<InkPoint> live = new List<InkPoint>();
         InkTool liveTool;
         string liveId, liveBrush;        // the stroke's id from the start: brushes seed their randomness with it
+        int liveSpread;
+        string shapeId;                  // the shape being drawn (its brush's randomness is seeded from it)
         uint liveSeed;
         int liveArgb;
         float liveWidth;
@@ -373,7 +377,91 @@ namespace LiveWall.Ink
             return Rectangle.Intersect(r, ClientArea);
         }
 
-        void RefreshToolbar() { if (toolbar != null && !toolbar.IsDisposed) toolbar.RefreshAll(); }
+        void RefreshToolbar()
+        {
+            if (toolbar != null && !toolbar.IsDisposed) toolbar.RefreshAll();
+            UpdateAnimation();
+        }
+
+        // ------------------------------------------------------------------ animation preview
+
+        // While the drawing has animated glow it plays here too: up to 20 frames a second (fewer when a frame takes long,
+        // so drawing it stays under ~40% of this thread), only the glowing areas, the same moments as the wallpaper's
+        // loop. It waits while the pen is down, text is written or a selection floats.
+        Timer animTimer;
+        System.Diagnostics.Stopwatch animClock;
+        int animRevision = -1;
+        List<MovingArea> animAreas;
+
+        void UpdateAnimation()
+        {
+            if (closing || frame == null || Document.Revision == animRevision) return;
+            animRevision = Document.Revision;
+            DropAnimAreas();
+            animAreas = InkGlow.MovingParts(Document.Snapshot(), map, Monitor.Width, Monitor.Height)
+                .Select(p => new MovingArea(Rectangle.Intersect(p.Key, ClientArea), p.Value)).Where(a => a.Area.Width > 0 && a.Area.Height > 0).ToList();
+            if (animAreas.Count > 0 && animTimer == null)
+            {
+                animTimer = new Timer { Interval = 50 };
+                animTimer.Tick += (o, e) => AnimTick();
+                animClock = System.Diagnostics.Stopwatch.StartNew();
+                animTimer.Start();
+            }
+            else if (animAreas.Count == 0) StopAnimation();
+        }
+
+        void StopAnimation()
+        {
+            DropAnimAreas();
+            if (animTimer == null) return;
+            animTimer.Stop();
+            animTimer.Dispose();
+            animTimer = null;
+        }
+
+        void DropAnimAreas()
+        {
+            if (animAreas == null) return;
+            foreach (var a in animAreas) a.Dispose();
+            animAreas = null;
+        }
+
+        void AnimTick()
+        {
+            if (closing || frame == null) return;
+            UpdateAnimation();
+            if (animTimer == null || animAreas == null || active || Selecting || Writing || previewOpacity != null) return;
+            bool timed = InkGlow.Timed, linear = InkRenderer.Linear;
+            var took = System.Diagnostics.Stopwatch.StartNew();
+            InkGlow.Timed = true;
+            InkGlow.Time = animClock.Elapsed.TotalSeconds % InkGlow.Loop;
+            InkRenderer.Linear = true;
+            Rectangle dirty = Rectangle.Empty;
+            try
+            {
+                using (var g = Graphics.FromImage(frame.Bitmap))
+                {
+                    InkRenderer.Prepare(g);
+                    foreach (var area in animAreas)
+                    {
+                        Rectangle r = area.Area;
+                        g.SetClip(r);
+                        g.CompositingMode = CompositingMode.SourceCopy;
+                        g.DrawImage(background, r, r, GraphicsUnit.Pixel);
+                        g.CompositingMode = CompositingMode.SourceOver;
+                        area.Draw(g, map);
+                        dirty = dirty.IsEmpty ? r : Rectangle.Union(dirty, r);
+                    }
+                }
+            }
+            finally
+            {
+                InkGlow.Timed = timed;
+                InkRenderer.Linear = linear;
+            }
+            if (!dirty.IsEmpty) frame.Present(Handle, Monitor.Location, dirty);
+            if (animTimer != null) animTimer.Interval = Math.Max(50, Math.Min(250, (int)(took.ElapsedMilliseconds * 2.5)));
+        }
 
         static string NewId() { return Guid.NewGuid().ToString("N"); }
 
@@ -420,6 +508,7 @@ namespace LiveWall.Ink
                     shaping = true;
                     erasing = false;
                     shapeStart = shapeEnd = new InkPoint(c0.X, c0.Y, 128);
+                    shapeId = NewId();
                     liveDirty = Rectangle.Empty;
                     DrawShapePreview();
                     return;
@@ -431,6 +520,7 @@ namespace LiveWall.Ink
             liveTool = tool == EditorTool.Highlighter ? InkTool.Highlighter : InkTool.Pen;
             liveId = NewId();
             liveBrush = liveTool == InkTool.Pen && InkBrush.IsBrush(penBrush) ? penBrush : null;
+            liveSpread = penSpread;
             liveSeed = InkBrush.Seed(liveId);
             liveArgb = color;
             liveWidth = (liveTool == InkTool.Highlighter ? highlighterSize : penSize) * unit;
@@ -490,13 +580,13 @@ namespace LiveWall.Ink
                 {
                     // Redraw the area of the new segment from the finished drawing: the brush's own pixels, already final.
                     InkPoint a = live.Count > 1 ? live[live.Count - 2] : live[0], b = live[live.Count - 1];
-                    float reach = liveWidth * 1.7f * InkBrush.Extent(liveBrush) / 2 + 1;
+                    float reach = liveWidth * 1.7f * InkBrush.Extent(liveBrush, liveSpread / 100f) / 2 + 1;
                     var seg = RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
                     dirty = TargetRect(RectangleF.Inflate(seg, reach, reach), 3);
                     CopyRect(baseLayer, g, dirty);
                     g.SetClip(dirty);
                     var arr = live.ToArray();
-                    InkBrush.Draw(g, liveBrush, liveArgb, liveWidth, arr, arr.Length, liveSeed, map, dirty);
+                    InkBrush.Draw(g, liveBrush, liveArgb, liveWidth, arr, arr.Length, liveSeed, map, dirty, false, liveSpread / 100f);
                     g.ResetClip();
                     DrawAbove(g, dirty);
                 }
@@ -573,7 +663,7 @@ namespace LiveWall.Ink
             InkPoint tail = live[live.Count - 1];
             if (Math.Abs(tail.X - lastRaw.X) + Math.Abs(tail.Y - lastRaw.Y) > 0.5f) live.Add(new InkPoint(lastRaw.X, lastRaw.Y, lastPressure));
 
-            var stroke = Glowing(InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush));
+            var stroke = Glowing(InkStroke.Freehand(liveId, author, DateTime.UtcNow.Ticks, liveTool, liveArgb, liveWidth, live.ToArray(), liveBrush, liveSpread));
             live.Clear();
             AddToDoc(stroke);
             var action = new UndoAction();
@@ -700,10 +790,14 @@ namespace LiveWall.Ink
             var r = RectangleF.FromLTRB(Math.Min(shapeStart.X, shapeEnd.X), Math.Min(shapeStart.Y, shapeEnd.Y),
                                         Math.Max(shapeStart.X, shapeEnd.X), Math.Max(shapeStart.Y, shapeEnd.Y));
             float pad = (lastShape == InkTool.Arrow ? InkRenderer.ArrowHead(width) : width / 2) + 2;
+            if (ShapeBrush != null) pad = pad * InkBrush.Extent(ShapeBrush, penSpread / 100f) + width;
             return TargetRect(RectangleF.Inflate(r, pad, pad), 3);
         }
 
         bool ShapeFilled { get { return shapeFilled && (lastShape == InkTool.Rectangle || lastShape == InkTool.Ellipse); } }
+
+        // Shapes are drawn with the pen's brush (none for the round pen).
+        string ShapeBrush { get { return InkBrush.IsBrush(penBrush) ? penBrush : null; } }
 
         void DrawShapePreview()
         {
@@ -714,7 +808,7 @@ namespace LiveWall.Ink
             {
                 CopyRect(baseLayer, g, dirty);
                 g.SetClip(now);
-                InkRenderer.DrawShape(g, lastShape, color, w, shapeStart, shapeEnd, ShapeFilled, map);
+                InkRenderer.DrawShape(g, lastShape, color, w, shapeStart, shapeEnd, ShapeFilled, map, ShapeBrush, penSpread / 100f, InkBrush.Seed(shapeId));
                 g.ResetClip();
                 DrawAbove(g, dirty);
             }
@@ -731,8 +825,8 @@ namespace LiveWall.Ink
                 RenderRegion(preview);   // a click, not a shape
                 return;
             }
-            AddElement(Glowing(InkStroke.Shape(NewId(), author, DateTime.UtcNow.Ticks, lastShape, color, penSize * unit, shapeStart, shapeEnd, ShapeFilled)),
-                       null, preview);
+            AddElement(Glowing(InkStroke.Shape(shapeId ?? NewId(), author, DateTime.UtcNow.Ticks, lastShape, color, penSize * unit, shapeStart, shapeEnd,
+                                               ShapeFilled, ShapeBrush, penSpread)), null, preview);
         }
 
         // ------------------------------------------------------------------ fill and eyedropper
@@ -1408,7 +1502,7 @@ namespace LiveWall.Ink
             items.Add(select);
             InkToolbar.Item shapes = null;
             shapes = InkToolbar.Item.Custom((g, r, fg) => InkToolbar.DrawShapeIcon(g, r, lastShape, ShapeFilled, fg),
-                "Shapes: line (L), arrow (A), rectangle (R), ellipse (O). Hold Shift for straight lines, squares and circles.",
+                "Shapes: line (L), arrow (A), rectangle (R), ellipse (O), drawn with the pen's brush. Hold Shift for straight lines, squares and circles.",
                 () => { SetTool(EditorTool.Shape); if (toolbar.FlyoutOpen) toolbar.CloseFlyout(); else toolbar.ShowFlyout(shapes, BuildShapeFlyout()); },
                 () => tool == EditorTool.Shape);
             shapes.HasFlyout = true;
@@ -1499,7 +1593,7 @@ namespace LiveWall.Ink
         // The editor's glow settings on a new pen stroke, shape or text.
         InkStroke Glowing(InkStroke s)
         {
-            return glowOn && InkGlow.Applies(s) ? s.WithGlow(glowStrength, glowAnim, glowAnim == InkGlow.Steady ? 0 : glowSpeed) : s;
+            return glowOn && InkGlow.Applies(s) ? s.WithGlow(glowStrength, glowAnim, glowAnim == InkGlow.Steady ? 0 : glowSpeed, glowDim) : s;
         }
 
         void SetGlow(bool on)
@@ -1520,9 +1614,15 @@ namespace LiveWall.Ink
                     () => glowOn ? Array.IndexOf(kinds, glowAnim) + 1 : 0,
                     i => { glowOn = i > 0; if (i > 0) glowAnim = kinds[i - 1]; RefreshToolbar(); }),
                 InkToolbar.Item.Separator(),
+                InkToolbar.Item.Hint("Bright"),
                 InkToolbar.Item.Slider("How bright the glow is (" + glowStrength + "%)", () => (glowStrength - 10) / 90f,
                     v => { glowStrength = 10 + (int)Math.Round(v * 90); RefreshToolbar(); },
                     () => (6 + glowStrength * 0.18f) * dpiScale, () => glowOn),
+                InkToolbar.Item.Separator(),
+                InkToolbar.Item.Hint("Dim to"),
+                InkToolbar.Item.Slider("Dim to: how dark it gets between flashes (" + glowDim + "%; more = stronger twinkle)", () => glowDim / 100f,
+                    v => { glowDim = (int)Math.Round(v * 100); RefreshToolbar(); },
+                    () => (22 - glowDim * 0.16f) * dpiScale, () => glowOn && glowAnim != InkGlow.Steady),
                 InkToolbar.Item.Separator(),
                 InkToolbar.Item.Segment(new[] { "Slow", "Medium", "Fast" }, "How fast it pulses, twinkles or flickers",
                     () => glowSpeed - 1, i => { glowSpeed = i + 1; RefreshToolbar(); })
@@ -1539,14 +1639,18 @@ namespace LiveWall.Ink
                 {
                     penBrush = brush;
                     SetTool(EditorTool.Pen);
-                    toolbar.CloseFlyout();
-                    RefreshToolbar();
-                    toolbar.ShowMessage(penItem, InkBrush.Title(brush));
+                    RefreshToolbar();   // the flyout stays open for the spread; drawing closes it
                 };
                 Func<bool> chosen = () => penBrush == brush;
                 items.Add(brush == InkBrush.Pen ? InkToolbar.Item.Button("\uE70F", "P", InkBrush.Tip(brush), pick, chosen)
                                                 : InkToolbar.Item.Custom((g, r, fg) => InkBrush.DrawIcon(g, r, brush, fg), InkBrush.Tip(brush), pick, chosen));
             }
+            items.Add(InkToolbar.Item.Separator());
+            items.Add(InkToolbar.Item.Hint("Spread"));
+            // Spread 25% .. 400%, on a log scale.
+            items.Add(InkToolbar.Item.Slider("Spread: how far spray scatters, how soft the airbrush is, how wide neon glows (" + penSpread + "%)",
+                () => (float)(Math.Log(penSpread / 25.0) / Math.Log(16)), v => { penSpread = (int)Math.Round(25 * Math.Pow(16, v)); RefreshToolbar(); },
+                () => (4 + 20 * (float)(Math.Log(penSpread / 25.0) / Math.Log(16))) * dpiScale, () => InkBrush.UsesSpread(penBrush)));
             return items;
         }
 
@@ -1732,6 +1836,7 @@ namespace LiveWall.Ink
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             base.OnFormClosed(e);
+            StopAnimation();
             if (toolbar != null && !toolbar.IsDisposed) toolbar.Close();
             if (colorPicker != null && !colorPicker.IsDisposed) colorPicker.Close();
             if (textPanel != null && !textPanel.IsDisposed) textPanel.Close();

@@ -37,8 +37,10 @@ Boards and drawing
   Drawings on a wallpaper are kept per wallpaper and shown above it, below the desktop icons. Tray icon >
   Drawings on wallpapers hides or removes them. Esc (or Ctrl+Alt+D again) when done.
 - Brushes: click the pen button again for soft airbrush, spray, pencil (press lighter for lighter lines), marker,
-  calligraphy, chalk (great on the blackboard), crayon, neon and dashed line. The pen button then shows the brush;
-  P keeps it. Soft and spray don't hold a fill in; the others do.
+  calligraphy, chalk (great on the blackboard), crayon, neon and dashed line, and a Spread slider (how far spray
+  scatters, how soft the airbrush is, how wide neon glows). The pen button then shows the brush; P keeps it. Shapes
+  (line, arrow, rectangle, ellipse) are drawn with the same brush. Soft and spray don't hold a fill in; the others
+  do. The size slider goes up to 200.
 - Tools: P pen, H highlighter, E eraser (or the pen's eraser end / right mouse button; it erases only what it
   touches - press E again, or click the eraser button, for "whole strokes"), shapes (L line, A arrow,
   R rectangle, O ellipse; Shift = straight / square / circle; the shapes button also switches filled shapes),
@@ -54,8 +56,10 @@ Boards and drawing
   (PNG, JPEG, GIF, BMP, TIFF, and WebP/HEIC/AVIF when Windows can open them). Enter, Esc or clicking outside puts
   it down; Ctrl+Z before that puts it back.
 - Glow: the sun button (or G) makes what you draw next shine: pens (any brush), shapes and text get a soft halo
-  in their color and a brighter core. Click it again for how bright, and Steady, Pulse, Twinkle or Flicker at Slow,
-  Medium or Fast (each star twinkles at its own moment). On a board, animated glow plays as the wallpaper: the
+  in their color and a brighter core. Click it again for Off / Steady / Pulse / Twinkle / Flicker, Bright (how
+  strong the glow is), Dim to (how dark it gets between flashes: more = a stronger twinkle) and Slow / Medium /
+  Fast. Each star twinkles at its own moment; in a spray, grain (pencil, chalk, crayon) or dashed line every speck
+  shines and twinkles on its own. While you draw, the animation plays in the drawing window too. On a board, animated glow plays as the wallpaper: the
   board becomes a short seamless looping video (made in the background in a few seconds), played and paused like a
   video wallpaper, with the still board shown meanwhile and whenever it is paused. Settings > Boards & drawing can
   turn board animations off; boards without animations stay a still picture that costs nothing. Drawings on

@@ -45,6 +45,8 @@ namespace LiveWall.Ink
         public readonly int Glow;            // pens, shapes, text: 1-100 = emissive (see InkGlow), 0 = not
         public readonly string Anim;         // glowing: pulse, twinkle, flicker (null = steady)
         public readonly int Speed;           // animated: 1 slow, 2 medium, 3 fast
+        public readonly int Dim;             // animated: how far it dims at its darkest, percent
+        public readonly int Spread;          // brushes that spread (spray, soft, neon): percent of normal
         public readonly string Data;         // images: PNG, base64
         RectangleF bounds;
         bool boundsKnown;
@@ -54,18 +56,22 @@ namespace LiveWall.Ink
 
         InkStroke(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, bool filled,
                   InkFill.Mask mask, string text, string font, bool bold, bool italic, string effect, string baseId, string data,
-                  string under = null, string brush = null, string layer = null, int glow = 0, string anim = null, int speed = 0)
+                  string under = null, string brush = null, string layer = null, int glow = 0, string anim = null, int speed = 0,
+                  int spread = 100, int dim = -1)
         {
             Id = id; Author = author; Ticks = ticks; Tool = tool; Argb = argb; Width = Math.Max(0.5f, width);
             Points = points ?? new InkPoint[0];
             Filled = filled; Mask = mask; Text = text; Font = font; Bold = bold; Italic = italic; Effect = effect; Base = baseId; Data = data;
             Under = under;
-            Brush = tool == InkTool.Pen && !string.IsNullOrEmpty(brush) ? brush : null;
+            bool shape = tool == InkTool.Line || tool == InkTool.Arrow || tool == InkTool.Rectangle || tool == InkTool.Ellipse;
+            Brush = (tool == InkTool.Pen || shape) && !string.IsNullOrEmpty(brush) ? brush : null;
+            Spread = Brush != null && InkBrush.UsesSpread(Brush) ? Math.Max(25, Math.Min(400, spread <= 0 ? 100 : spread)) : 100;
             Layer = string.IsNullOrEmpty(layer) || layer == InkDocument.BaseLayer ? null : layer;
             bool canGlow = tool == InkTool.Pen || tool == InkTool.Text || tool == InkTool.Line || tool == InkTool.Arrow || tool == InkTool.Rectangle || tool == InkTool.Ellipse;
             Glow = canGlow ? Math.Max(0, Math.Min(100, glow)) : 0;
             Anim = Glow > 0 && !string.IsNullOrEmpty(anim) && Array.IndexOf(InkGlow.Kinds, anim) > 0 ? anim : null;
             Speed = Anim == null ? 0 : speed < 1 || speed > 3 ? 2 : speed;
+            Dim = Anim == null ? 0 : dim < 0 ? InkGlow.DefaultDim : Math.Min(100, dim);
             if (tool == InkTool.Pen || tool == InkTool.Highlighter)
             {
                 byte first = Points.Length > 0 ? Points[0].P : (byte)128;
@@ -74,14 +80,19 @@ namespace LiveWall.Ink
         }
 
         // A freehand pen (with a brush, or null for the round pen) or highlighter stroke.
-        public static InkStroke Freehand(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, string brush)
+        public static InkStroke Freehand(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint[] points, string brush,
+                                         int spread = 100)
         {
-            return new InkStroke(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null, null, null, brush);
+            return new InkStroke(id, author, ticks, tool, argb, width, points, false, null, null, null, false, false, null, null, null, null, brush,
+                                 null, 0, null, 0, spread);
         }
 
-        public static InkStroke Shape(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled)
+        // `brush`: its outline drawn with a pen brush (null = the plain line).
+        public static InkStroke Shape(string id, string author, long ticks, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled,
+                                      string brush = null, int spread = 100)
         {
-            return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null, null);
+            return new InkStroke(id, author, ticks, tool, argb, width, new[] { a, b }, filled, null, null, null, false, false, null, null, null, null, brush,
+                                 null, 0, null, 0, spread);
         }
 
         // `under`: an element to draw it just below (null = on top).
@@ -102,26 +113,26 @@ namespace LiveWall.Ink
         // The same element in another color (a new element in the same place: see the class comment).
         public InkStroke Recolored(string id, string author, long ticks, int argb)
         {
-            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data, null, Brush, Layer, Glow, Anim, Speed);
+            return new InkStroke(id, author, ticks, Tool, argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Id, Data, null, Brush, Layer, Glow, Anim, Speed, Spread, Dim);
         }
 
-        InkStroke With(string baseId, string under, string brush, string layer, int glow, string anim, int speed)
+        InkStroke With(string baseId, string under, string brush, string layer, int glow, string anim, int speed, int spread, int dim)
         {
             return baseId == null && under == null && brush == null && layer == null && glow == 0 ? this
-                : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data, under, brush, layer, glow, anim, speed);
+                : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, baseId, Data, under, brush, layer, glow, anim, speed, spread, dim);
         }
 
         // The same element, glowing (0 = not). New elements get the editor's glow settings this way.
-        public InkStroke WithGlow(int glow, string anim, int speed)
+        public InkStroke WithGlow(int glow, string anim, int speed, int dim = -1)
         {
-            return new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Base, Data, Under, Brush, Layer, glow, anim, speed);
+            return new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Base, Data, Under, Brush, Layer, glow, anim, speed, Spread, dim);
         }
 
         // The same element on a layer (the editor puts new elements on the active one).
         public InkStroke InLayer(string layer)
         {
             string l = string.IsNullOrEmpty(layer) || layer == InkDocument.BaseLayer ? null : layer;
-            return l == Layer ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Base, Data, Under, Brush, l, Glow, Anim, Speed);
+            return l == Layer ? this : new InkStroke(Id, Author, Ticks, Tool, Argb, Width, Points, Filled, Mask, Text, Font, Bold, Italic, Effect, Base, Data, Under, Brush, l, Glow, Anim, Speed, Spread, Dim);
         }
 
         // Clears the area inside the outline (canvas units).
@@ -312,6 +323,8 @@ namespace LiveWall.Ink
             if (Glow > 0) sb.Append(" glow=").Append(Glow.ToString(ci));
             if (Anim != null) sb.Append(" anim=").Append(Anim);
             if (Anim != null && Speed != 2) sb.Append(" speed=").Append(Speed.ToString(ci));
+            if (Anim != null && Dim != InkGlow.DefaultDim) sb.Append(" dim=").Append(Dim.ToString(ci));
+            if (Brush != null && Spread != 100) sb.Append(" spread=").Append(Spread.ToString(ci));
             return sb.ToString();
         }
 
@@ -320,7 +333,7 @@ namespace LiveWall.Ink
             InkStroke s = ParseElement(f);
             if (s == null) return null;
             string baseId = null, under = null, brush = null, layer = null, anim = null;
-            int glow = 0, speed = 0;
+            int glow = 0, speed = 0, spread = 100, dim = -1;
             for (int i = 8; i < f.Length; i++)
             {
                 if (f[i].StartsWith("z=")) baseId = f[i].Substring(2);
@@ -330,8 +343,10 @@ namespace LiveWall.Ink
                 else if (f[i].StartsWith("glow=")) int.TryParse(f[i].Substring(5), NumberStyles.Integer, CultureInfo.InvariantCulture, out glow);
                 else if (f[i].StartsWith("anim=")) anim = f[i].Substring(5);
                 else if (f[i].StartsWith("speed=")) int.TryParse(f[i].Substring(6), NumberStyles.Integer, CultureInfo.InvariantCulture, out speed);
+                else if (f[i].StartsWith("spread=")) int.TryParse(f[i].Substring(7), NumberStyles.Integer, CultureInfo.InvariantCulture, out spread);
+                else if (f[i].StartsWith("dim=") && !int.TryParse(f[i].Substring(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out dim)) dim = -1;
             }
-            return s.With(baseId, under, brush, layer, glow, anim, speed);
+            return s.With(baseId, under, brush, layer, glow, anim, speed, spread, dim);
         }
 
         static InkStroke ParseElement(string[] f)
@@ -420,8 +435,8 @@ namespace LiveWall.Ink
     //       optional z=<id>: replaces that element and takes its place in the drawing order (recolor, edited text)
     //       optional brush=<kind>: pens only, see InkBrush (soft, spray, pencil, marker, calligraphy, chalk, crayon, neon,
     //       dashed); older versions ignore it and draw a round pen
-    //       optional glow=<1-100> [anim=pulse|twinkle|flicker [speed=1|3]]: pens, shapes and text glow (see InkGlow);
-    //       older versions ignore it
+    //       optional glow=<1-100> [anim=pulse|twinkle|flicker [speed=1|3] [dim=<0-100>]]: pens, shapes and text glow
+    //       (see InkGlow); optional brush= on shapes too, spread=<25-400> for spray/soft/neon; older versions ignore them
     //       optional under=<id>: drawn just below that element (a fill goes under the highlighters and pens drawn after
     //       the last fill or eraser it overlaps); older versions ignore it and draw the element on top
     //       optional layer=<id>: the layer it is on (none = the base layer)

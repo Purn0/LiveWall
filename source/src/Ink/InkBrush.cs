@@ -62,16 +62,35 @@ namespace LiveWall.Ink
         }
 
         // The paint's full width as a multiple of the stroke's width at that pressure (bounds, hit tests, redraw areas).
-        public static float Extent(string b)
+        // `spread`: 1 = normal (spray, soft and neon only).
+        public static float Extent(string b, float spread = 1)
         {
             switch (b)
             {
-                case Soft: return 1.3f;
-                case Spray: return 1.2f;
+                case Soft: return Math.Max(1.1f, 1.3f * spread);
+                case Spray: return Math.Max(1.2f, 1.1f * spread + 0.1f);
                 case Marker: return 1.6f;
                 case Calligraphy: return 1.9f;
-                case Neon: return 2.6f;
+                case Neon: return Math.Max(1.1f, 2.6f * spread);
                 default: return 1.1f;
+            }
+        }
+
+        // Brushes whose spread can be set: how far spray scatters, how soft the airbrush is, how wide neon glows.
+        public static bool UsesSpread(string b) { return b == Spray || b == Soft || b == Neon; }
+
+        // Made of separate specks or pieces: glowing, each one shines and twinkles on its own (see InkGlow).
+        public static bool Particles(string b) { return b == Spray || b == Pencil || b == Chalk || b == Crayon || b == Dashed; }
+
+        // About one speck (or dash) per cell of this size, canvas units: the grain of their independent twinkling.
+        public static float Cell(string b, float width)
+        {
+            switch (b)
+            {
+                case Spray: return Math.Max(3, width * 0.2f);
+                case Pencil: return 3;
+                case Dashed: return Math.Max(4, width * 2.4f + 2);
+                default: return 4;
             }
         }
 
@@ -88,14 +107,16 @@ namespace LiveWall.Ink
 
         // `solid`: plain coverage, for the fill tool's boundaries (no grain, no gaps between dashes, no glow).
         public static void Draw(Graphics g, string brush, int argb, float width, InkPoint[] pts, int count, uint seed, InkMapping m,
-                                RectangleF clip, bool solid = false)
+                                RectangleF clip, bool solid = false, float spread = 1)
         {
             if (count <= 0) return;
             Color c = Color.FromArgb(255, Color.FromArgb(argb));
+            spread = Math.Max(0.25f, Math.Min(4f, spread));
             switch (brush)
             {
-                case Soft: Stamps(g, c, width, pts, count, m, clip, 1.3f, 0.12f, 0.13f); break;
-                case Spray: Speckles(g, c, width, pts, count, seed, m, clip); break;
+                // Softer = bigger dabs, each fainter, so the middle stays about as strong.
+                case Soft: Stamps(g, c, width, pts, count, m, clip, 1.3f * spread, 0.12f, 0.13f / (float)Math.Sqrt(spread)); break;
+                case Spray: Speckles(g, c, width, pts, count, seed, m, clip, spread); break;
                 case Pencil: Runs(g, c, width, 0.55f, pts, count, m, clip, solid ? null : Pencil); break;
                 case Chalk: Runs(g, c, width, 1.0f, pts, count, m, clip, solid ? null : Chalk); break;
                 case Crayon: Runs(g, c, width, 1.05f, pts, count, m, clip, solid ? null : Crayon); break;
@@ -103,7 +124,7 @@ namespace LiveWall.Ink
                 case Calligraphy: Nib(g, c, width, pts, count, m, clip, 45, 1.8f, 0.09f); break;
                 case Neon:
                     // A glow, the colored tube, and its hot white middle (reads on dark and light boards).
-                    if (!solid) Stamps(g, c, width, pts, count, m, clip, 2.6f, 0.3f, 0.1f);
+                    if (!solid) Stamps(g, c, width, pts, count, m, clip, 2.6f * spread, 0.3f, 0.1f / (float)Math.Sqrt(spread));
                     Runs(g, c, width, solid ? 0.8f : 0.5f, pts, count, m, clip, null);
                     if (!solid) Runs(g, Mix(c, Color.White, 0.8f), width, 0.2f, pts, count, m, clip, null);
                     break;
@@ -181,14 +202,15 @@ namespace LiveWall.Ink
             g.Restore(state);
         }
 
-        static void Speckles(Graphics g, Color c, float width, InkPoint[] pts, int count, uint seed, InkMapping m, RectangleF clip)
+        // `spread`: how far the specks scatter (more of them, the same size, so the spray keeps its density).
+        static void Speckles(Graphics g, Color c, float width, InkPoint[] pts, int count, uint seed, InkMapping m, RectangleF clip, float spread)
         {
-            int perStamp = Math.Max(4, Math.Min(80, (int)(width * 0.8f)));
+            int perStamp = Math.Max(4, Math.Min(240, (int)(width * 0.8f * spread)));
             float dot = Math.Max(0.8f, width * 0.07f);
             using (var b = new SolidBrush(c))
                 foreach (var s in Along(pts, count, Math.Max(0.8f, width * 0.25f)))
                 {
-                    float radius = width * InkRenderer.PressureFactor((byte)s.P) * 0.55f;
+                    float radius = width * InkRenderer.PressureFactor((byte)s.P) * 0.55f * spread;
                     PointF p = m.ToTarget(s.X, s.Y);
                     float reach = (radius + dot) * m.Scale;
                     if (!clip.IsEmpty && !new RectangleF(p.X - reach, p.Y - reach, reach * 2, reach * 2).IntersectsWith(clip)) continue;

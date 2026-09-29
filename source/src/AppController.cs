@@ -730,7 +730,9 @@ namespace LiveWall
         {
             Native.KillTimer(window.Handle, TimerEvaluateSoon);
             if (exiting) return;
-            SetEcoQos(editor == null);   // efficiency mode, except while someone is drawing (pen latency)
+            // Efficiency mode, except while someone is drawing (pen latency) or a board animation is being made (a one-off
+            // job: at full speed it is done in seconds instead of a minute, for about the same energy).
+            SetEcoQos(editor == null && !encodingAnimation);
             if (currentVideo == null || surfaces.Count == 0)
             {
                 pauseReason = "";

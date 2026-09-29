@@ -33,6 +33,7 @@ namespace LiveWall
         InkDocument currentInk;        // drawings on the current wallpaper (null when there are none)
         string boardVideo;             // the board's glow animation playing as the wallpaper (null = the still picture)
         string boardVideoFailed;       // an animation that would not play: the still picture stays
+        bool encodingAnimation;        // a board animation is being made (efficiency mode is off meanwhile)
 
         void InitInk()
         {
@@ -293,6 +294,8 @@ namespace LiveWall
                     if (anim == null || string.Equals(anim, boardVideoFailed, StringComparison.OrdinalIgnoreCase)) return;
                     if (File.Exists(anim)) { StartBoardVideo(anim); return; }
                     // Made once in the background (a few seconds); the still picture shows meanwhile.
+                    encodingAnimation = true;
+                    SetEcoQos(false);
                     worker.EnqueueLatest("board-anim", () =>
                     {
                         bool made = InkGlow.RenderAnimation(style, layers, cw, ch, sz.Width, sz.Height, header, seed, anim);
@@ -300,6 +303,8 @@ namespace LiveWall
                         return made;
                     }, made =>
                     {
+                        encodingAnimation = false;
+                        Evaluate();   // efficiency mode back on
                         if (board == null || boardDoc != doc) return;
                         if (made) StartBoardVideo(anim);
                         else { Log.Warn("Board animation could not be made; showing the still picture"); boardVideoFailed = anim; }

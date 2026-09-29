@@ -74,9 +74,10 @@ namespace LiveWall.Ink
 
         public static float MaxWidth(InkStroke s)
         {
+            if (s.IsShape && InkBrush.IsBrush(s.Brush)) return s.Width * InkBrush.Extent(s.Brush, s.Spread / 100f);
             if (s.Tool == InkTool.Highlighter || s.IsShape || s.Tool == InkTool.Erase) return s.Width;
             if (s.Tool == InkTool.Fill || s.Tool == InkTool.Text || s.Tool == InkTool.Image) return 0;
-            float k = InkBrush.IsBrush(s.Brush) ? InkBrush.Extent(s.Brush) : 1;
+            float k = InkBrush.IsBrush(s.Brush) ? InkBrush.Extent(s.Brush, s.Spread / 100f) : 1;
             if (!s.HasPressure) return s.Width * PressureFactor(s.Points.Length > 0 ? s.Points[0].P : (byte)128) * k;
             return s.Width * 1.7f * k;
         }
@@ -124,7 +125,7 @@ namespace LiveWall.Ink
         {
             if (s.Tool == InkTool.Pen && InkBrush.IsBrush(s.Brush))
             {
-                InkBrush.Draw(g, s.Brush, s.Argb, s.Width, s.Points, s.Points.Length, InkBrush.Seed(s.Id), m, RectangleF.Empty, solid);
+                InkBrush.Draw(g, s.Brush, s.Argb, s.Width, s.Points, s.Points.Length, InkBrush.Seed(s.Id), m, RectangleF.Empty, solid, s.Spread / 100f);
                 return;
             }
             switch (s.Tool)
@@ -137,7 +138,8 @@ namespace LiveWall.Ink
                     DrawPoints(g, s.Tool, s.Argb, s.Width, s.Points, s.Points.Length, s.HasPressure, m, opaque);
                     return;
             }
-            if (s.Points.Length >= 2) DrawShape(g, s.Tool, s.Argb, s.Width, s.Points[0], s.Points[1], s.Filled, m);
+            if (s.Points.Length >= 2)
+                DrawShape(g, s.Tool, s.Argb, s.Width, s.Points[0], s.Points[1], s.Filled, m, solid ? null : s.Brush, s.Spread / 100f, InkBrush.Seed(s.Id));
         }
 
         // The partial eraser: makes its path transparent. Only ever drawn onto an ink-only layer (never onto a background).
@@ -176,9 +178,12 @@ namespace LiveWall.Ink
             g.CompositingMode = mode;
         }
 
-        // Line, arrow, rectangle or ellipse from `a` to `b` (canvas units).
-        public static void DrawShape(Graphics g, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled, InkMapping m)
+        // Line, arrow, rectangle or ellipse from `a` to `b` (canvas units). `brush`: the outline drawn with that pen brush
+        // (a filled shape is filled plain first).
+        public static void DrawShape(Graphics g, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled, InkMapping m,
+                                     string brushKind = null, float spread = 1, uint seed = 0)
         {
+            if (InkBrush.IsBrush(brushKind)) { DrawBrushShape(g, tool, argb, width, a, b, filled, m, brushKind, spread, seed); return; }
             Color color = Color.FromArgb(255, Color.FromArgb(argb));
             float w = Math.Max(0.8f, width * m.Scale);
             PointF pa = m.ToTarget(a.X, a.Y), pb = m.ToTarget(b.X, b.Y);
@@ -215,6 +220,52 @@ namespace LiveWall.Ink
                 }
             }
         }
+
+        static void DrawBrushShape(Graphics g, InkTool tool, int argb, float width, InkPoint a, InkPoint b, bool filled, InkMapping m,
+                                   string brush, float spread, uint seed)
+        {
+            var r = RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
+            if (filled && (tool == InkTool.Rectangle || tool == InkTool.Ellipse))
+                using (var fill = new SolidBrush(Color.FromArgb(255, Color.FromArgb(argb))))
+                {
+                    RectangleF t = m.ToTarget(r);
+                    if (tool == InkTool.Rectangle) g.FillRectangle(fill, t); else g.FillEllipse(fill, t);
+                }
+            foreach (InkPoint[] path in ShapePaths(tool, width, a, b, r))
+                InkBrush.Draw(g, brush, argb, width, path, path.Length, seed++, m, RectangleF.Empty, false, spread);
+        }
+
+        // A shape's outline as pen paths (canvas units, even pressure): what a brush draws along.
+        static List<InkPoint[]> ShapePaths(InkTool tool, float width, InkPoint a, InkPoint b, RectangleF r)
+        {
+            var list = new List<InkPoint[]>();
+            switch (tool)
+            {
+                case InkTool.Line: list.Add(new[] { P(a.X, a.Y), P(b.X, b.Y) }); break;
+                case InkTool.Arrow:
+                {
+                    PointF[] head = ArrowHeadPoints(a, b, width);
+                    list.Add(new[] { P(a.X, a.Y), P((head[1].X + head[2].X) / 2, (head[1].Y + head[2].Y) / 2) });
+                    list.Add(new[] { P(head[1].X, head[1].Y), P(head[0].X, head[0].Y), P(head[2].X, head[2].Y), P(head[1].X, head[1].Y) });
+                    break;
+                }
+                case InkTool.Rectangle:
+                    list.Add(new[] { P(r.Left, r.Top), P(r.Right, r.Top), P(r.Right, r.Bottom), P(r.Left, r.Bottom), P(r.Left, r.Top) });
+                    break;
+                case InkTool.Ellipse:
+                {
+                    float rx = r.Width / 2, ry = r.Height / 2, cx = r.Left + rx, cy = r.Top + ry;
+                    int n = Math.Max(24, Math.Min(360, (int)((rx + ry) / 3)));
+                    var pts = new InkPoint[n + 1];
+                    for (int i = 0; i <= n; i++) { double t = i * 2 * Math.PI / n; pts[i] = P(cx + rx * (float)Math.Cos(t), cy + ry * (float)Math.Sin(t)); }
+                    list.Add(pts);
+                    break;
+                }
+            }
+            return list;
+        }
+
+        static InkPoint P(float x, float y) { return new InkPoint(x, y, 128); }
 
         public static float ArrowHead(float width) { return Math.Max(width * 3.2f, 10f); }
 
