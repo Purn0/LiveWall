@@ -121,7 +121,7 @@ namespace LiveWall.Ink
             DrawElement(g, s, m, opaque, solid);
         }
 
-        static void DrawElement(Graphics g, InkStroke s, InkMapping m, bool opaque, bool solid = false)
+        internal static void DrawElement(Graphics g, InkStroke s, InkMapping m, bool opaque, bool solid = false)
         {
             if (s.Tool == InkTool.Pen && InkBrush.IsBrush(s.Brush))
             {

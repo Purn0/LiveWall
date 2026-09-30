@@ -34,7 +34,7 @@ and music that knows when to be quiet.</p>
 
 ### Boards
 - A **daily board** that starts fresh every day (earlier days are kept) and a **permanent board**, shown as the wallpaper with one shortcut.
-- Whiteboard, blackboard, grid or dotted paper; every board is also saved as a picture in *Pictures\LiveWall Boards*.
+- Whiteboard, blackboard, grid or dotted paper; every board is also saved as a picture in *Pictures\LiveWall Boards*, and an animated one as a looping video too.
 
 ### Drawing
 - **Pen, highlighter, eraser** (parts or whole strokes), **select** (rectangle or lasso: move, resize, rotate, flip, cut, copy, paste), **shapes**, **fill**, **text with emoji, kaomoji and symbols**, eyedropper and any color.
@@ -163,7 +163,7 @@ All four can be changed in Settings. The Start menu also gets **LiveWall Board**
 |---|---|
 | Settings | `%APPDATA%\LiveWall\settings.ini` |
 | Boards and drawings (plain text, one line per element) | `%APPDATA%\LiveWall\boards`, `%APPDATA%\LiveWall\ink` |
-| Board pictures | `Pictures\LiveWall Boards` |
+| Board pictures and animations | `Pictures\LiveWall Boards` |
 | Log and cache | `%LOCALAPPDATA%\LiveWall` |
 
 **Optional:** Settings can ask Claude for the mood of each wallpaper to pick matching music. This sends a small version of the picture once to Anthropic's API with *your own* key, which is stored encrypted for your Windows account. It is off by default; without it the mood comes from the picture's colors, on your PC.

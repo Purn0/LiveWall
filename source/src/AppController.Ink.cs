@@ -253,14 +253,15 @@ namespace LiveWall
             var date = boardDate;
             var layers = doc.Snapshot();
             string style = InkRenderer.NormalizeStyle(doc.Background);
-            bool animate = settings.AnimateBoards && InkGlow.AnyAnimated(layers);
+            bool moving = InkGlow.AnyAnimated(layers), animate = settings.AnimateBoards && moving;
             int cw = doc.CanvasWidth, ch = doc.CanvasHeight;
             Size sz = LargestMonitor();
             string header = Boards.Header(kind, date);
             int seed = Boards.Seed(kind, date);
             string name = kind == BoardKind.Daily ? "daily-" + date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "permanent";
             string path = Path.Combine(Boards.RenderDir, name + "-" + DateTime.UtcNow.Ticks.ToString("x", CultureInfo.InvariantCulture) + ".png");
-            // A copy anyone can open, in Pictures\LiveWall Boards (only once the board has something on it).
+            // A copy anyone can open, in Pictures\LiveWall Boards (only once the board has something on it); an animated
+            // board's loop goes next to it (ExportAnimation).
             string export = doc.Exists ? Boards.ExportPath(kind, date) : null;
             worker.EnqueueLatest("board-render", () =>
             {
@@ -268,7 +269,13 @@ namespace LiveWall
                 InkText.ClearCache();
                 if (done && export != null)
                 {
-                    try { Directory.CreateDirectory(Path.GetDirectoryName(export)); File.Copy(path, export, true); }
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(export));
+                        File.Copy(path, export, true);
+                        string video = Path.ChangeExtension(export, ".mp4");
+                        if (!moving && File.Exists(video)) File.Delete(video);   // nothing moves any more: it would be stale
+                    }
                     catch (Exception ex) { Log.Warn("Could not save " + export + ": " + ex.Message); }
                 }
                 return done;
@@ -284,6 +291,7 @@ namespace LiveWall
                     if (anim != null && string.Equals(anim, boardVideo, StringComparison.OrdinalIgnoreCase) && surfaces.Count > 0)
                     {
                         currentVideo = boardVideo;   // the same animation: it goes on
+                        ExportAnimation(anim, export);
                         Evaluate();
                         return;
                     }
@@ -292,7 +300,7 @@ namespace LiveWall
                     currentVideo = null;
                     TrimSoon();
                     if (anim == null || string.Equals(anim, boardVideoFailed, StringComparison.OrdinalIgnoreCase)) return;
-                    if (File.Exists(anim)) { StartBoardVideo(anim); return; }
+                    if (File.Exists(anim)) { ExportAnimation(anim, export); StartBoardVideo(anim); return; }
                     // Made once in the background (a few seconds); the still picture shows meanwhile.
                     encodingAnimation = true;
                     SetEcoQos(false);
@@ -306,11 +314,34 @@ namespace LiveWall
                         encodingAnimation = false;
                         Evaluate();   // efficiency mode back on
                         if (board == null || boardDoc != doc) return;
-                        if (made) StartBoardVideo(anim);
+                        if (made) { ExportAnimation(anim, export); StartBoardVideo(anim); }
                         else { Log.Warn("Board animation could not be made; showing the still picture"); boardVideoFailed = anim; }
                     });
                 }, true, ShellApi.DWPOS_FILL);
             });
+        }
+
+        // The board's loop next to its picture: Pictures\LiveWall Boards\Board yyyy-MM-dd.mp4 (or Permanent board.mp4), so an
+        // animated board is kept as it moves. On the worker; nothing to do when the copy there is already this one.
+        void ExportAnimation(string anim, string export)
+        {
+            if (export == null) return;
+            string video = Path.ChangeExtension(export, ".mp4");
+            worker.Enqueue("board-export:" + video, false, () =>
+            {
+                try
+                {
+                    var from = new FileInfo(anim);
+                    var to = new FileInfo(video);
+                    if (!from.Exists) return false;
+                    if (to.Exists && to.Length == from.Length && to.LastWriteTimeUtc == from.LastWriteTimeUtc) return true;   // a copy keeps the time
+                    Directory.CreateDirectory(to.DirectoryName);
+                    File.Copy(anim, video, true);
+                    Log.Info("Board animation saved: " + video);
+                    return true;
+                }
+                catch (Exception ex) { Log.Warn("Could not save " + video + ": " + ex.Message); return false; }
+            }, null);
         }
 
         // The board's glow animation fades in over its still picture (its first frame) and then plays, pauses and

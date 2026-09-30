@@ -398,8 +398,10 @@ namespace LiveWall.Ink
             if (closing || frame == null || Document.Revision == animRevision) return;
             animRevision = Document.Revision;
             DropAnimAreas();
-            animAreas = InkGlow.MovingParts(Document.Snapshot(), map, Monitor.Width, Monitor.Height)
+            var layers = Document.Snapshot();
+            animAreas = InkGlow.MovingParts(layers, map, Monitor.Width, Monitor.Height)
                 .Select(p => new MovingArea(Rectangle.Intersect(p.Key, ClientArea), p.Value)).Where(a => a.Area.Width > 0 && a.Area.Height > 0).ToList();
+            InkGlow.KeepMade(animAreas.Count > 0 ? layers.SelectMany(kv => kv.Value).Where(InkGlow.Animated) : null, map);
             if (animAreas.Count > 0 && animTimer == null)
             {
                 animTimer = new Timer { Interval = 50 };
@@ -413,6 +415,7 @@ namespace LiveWall.Ink
         void StopAnimation()
         {
             DropAnimAreas();
+            InkGlow.KeepMade(null, map);
             if (animTimer == null) return;
             animTimer.Stop();
             animTimer.Dispose();
@@ -439,19 +442,10 @@ namespace LiveWall.Ink
             Rectangle dirty = Rectangle.Empty;
             try
             {
-                using (var g = Graphics.FromImage(frame.Bitmap))
+                foreach (var area in animAreas)
                 {
-                    InkRenderer.Prepare(g);
-                    foreach (var area in animAreas)
-                    {
-                        Rectangle r = area.Area;
-                        g.SetClip(r);
-                        g.CompositingMode = CompositingMode.SourceCopy;
-                        g.DrawImage(background, r, r, GraphicsUnit.Pixel);
-                        g.CompositingMode = CompositingMode.SourceOver;
-                        area.Draw(g, map);
-                        dirty = dirty.IsEmpty ? r : Rectangle.Union(dirty, r);
-                    }
+                    area.Draw(frame.Bitmap, background, map);
+                    dirty = dirty.IsEmpty ? area.Area : Rectangle.Union(dirty, area.Area);
                 }
             }
             finally

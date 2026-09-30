@@ -122,12 +122,30 @@ namespace LiveWall.Ink
             public int[] BodyPx;           // animated: the element with its core over it (the halo is HaloPx)
             public Bitmap Dim;             // one dimmed moment of them, reused
             public double DimTime = -1;    // the moment in Dim (an element touching several redrawn areas is dimmed once)
+            public Field Fine, Coarse;     // particle brushes: brightness at FieldTime
+            public double FieldTime = -1;
             public Point At;               // target pixels
             public int W, H;
         }
 
         [ThreadStatic] static Dictionary<string, Made> cache;
         [ThreadStatic] static long cachedPixels;
+        [ThreadStatic] static long room;   // what the cache may hold while an animation plays or is encoded (0: the usual 4 M pixels)
+
+        // While an animation plays or is encoded, every moving element stays made: a cache that empties every frame makes
+        // them all over again each time (10x slower on a board with a few big pulsing shapes). At most 16 M pixels
+        // (~200 MB, only for as long as the animation runs); null = back to the usual size.
+        public static void KeepMade(IEnumerable<InkStroke> moving, InkMapping m)
+        {
+            long need = 0;
+            if (moving != null)
+                foreach (var s in moving)
+                {
+                    var b = Rectangle.Round(m.ToTarget(s.Bounds));
+                    need += (long)(b.Width + 6) * (b.Height + 6);
+                }
+            room = Math.Min(16000000L, need + need / 8);
+        }
 
         public static void ClearCache()
         {
@@ -201,11 +219,50 @@ namespace LiveWall.Ink
             Blit(g, mk, mk.Dim);
         }
 
-        static int Scale(int p, int k)
+        // One moment of an animated element blended straight into premultiplied pixels `px` (w x h, its top-left at target
+        // (ox, oy)), as DrawAnimated would draw it: no GDI+ call per element, which counts on a sky full of stars. False
+        // when the element is too big to have been made (the caller draws it the usual way).
+        public static bool BlendInto(int[] px, int w, int h, int ox, int oy, InkStroke s, InkMapping m)
+        {
+            Made mk = Make(s, m, (g, mm) => InkRenderer.DrawElement(g, s, mm, false));
+            if (mk == null || mk.BodyPx == null) return false;
+            int x0 = Math.Max(mk.At.X, ox), y0 = Math.Max(mk.At.Y, oy), x1 = Math.Min(mk.At.X + mk.W, ox + w), y1 = Math.Min(mk.At.Y + mk.H, oy + h);
+            if (x0 >= x1 || y0 >= y1) return true;
+            uint seed = InkBrush.Seed(s.Id);
+            bool spots = s.Brush != null && InkBrush.Particles(s.Brush);
+            int even = (int)(Level(s, seed) * 256);
+            if (spots && mk.FieldTime != Time)
+            {
+                float cell = InkBrush.Cell(s.Brush, s.Width);
+                mk.Fine = new Field(s, seed, m, mk, cell, 40000);
+                mk.Coarse = new Field(s, seed ^ 0x5bd1e995u, m, mk, cell * 5, 4000);
+                mk.FieldTime = Time;
+            }
+            int[] body = mk.BodyPx, halo = mk.HaloPx;
+            int n = x1 - x0;
+            for (int y = y0; y < y1; y++)
+            {
+                int o = (y - mk.At.Y) * mk.W + (x0 - mk.At.X), ly = y - mk.At.Y, t = (y - oy) * w + (x0 - ox);
+                for (int i = 0; i < n; i++)
+                {
+                    int b = body[o + i], hl = halo[o + i];
+                    if ((b | hl) == 0) continue;
+                    int lx = x0 - mk.At.X + i;
+                    int kb = spots ? mk.Fine.At(lx, ly) : even, kh = spots ? mk.Coarse.At(lx, ly) : even;
+                    int src = Blend(Scale(b, kb), Scale(hl, kh));
+                    if (src != 0) px[t + i] = Blend(src, px[t + i]);
+                }
+            }
+            return true;
+        }
+
+        // Premultiplied `p` at k/256 (every channel c * k >> 8, two at a time).
+        internal static int Scale(int p, int k)
         {
             if (p == 0 || k >= 256) return p;
             if (k <= 0) return 0;
-            return ((((p >> 24) & 0xFF) * k >> 8) << 24) | ((((p >> 16) & 0xFF) * k >> 8) << 16) | ((((p >> 8) & 0xFF) * k >> 8) << 8) | ((p & 0xFF) * k >> 8);
+            uint u = (uint)p, f = (uint)k;
+            return (int)(((u & 0x00FF00FF) * f >> 8 & 0x00FF00FF) | (((u >> 8) & 0x00FF00FF) * f & 0xFF00FF00));
         }
 
         // Brightness over an element's box at this moment: one phase per cell of the canvas (anchored to the canvas, so
@@ -309,15 +366,25 @@ namespace LiveWall.Ink
                 for (int i = 0; i < body.Length; i++) body[i] = Over(cp[i], body[i]);
                 mk.BodyPx = body;
             }
-            if (cachedPixels + (long)w * h > 4000000L) ClearCache();
+            if (cachedPixels + (long)w * h > Math.Max(4000000L, room)) ClearCache();
             if (cache == null) cache = new Dictionary<string, Made>();
             cache[key] = mk;
             cachedPixels += (long)w * h;
             return mk;
         }
 
+        // Premultiplied `src` over `dst`, two channels at a time, rounded: the blends done every frame of an animation.
+        internal static int Blend(int src, int dst)
+        {
+            uint s = (uint)src, d = (uint)dst, k = 255 - (s >> 24);
+            if (k == 0 || d == 0) return src;
+            if (s == 0) return dst;
+            uint rb = (d & 0x00FF00FF) * k + 0x00800080, ag = ((d >> 8) & 0x00FF00FF) * k + 0x00800080;
+            return (int)(s + ((rb + (rb >> 8 & 0x00FF00FF)) >> 8 & 0x00FF00FF) + ((ag + (ag >> 8 & 0x00FF00FF)) & 0xFF00FF00));
+        }
+
         // Premultiplied `src` over `dst`.
-        static int Over(int src, int dst)
+        internal static int Over(int src, int dst)
         {
             if (src == 0) return dst;
             int sa = (src >> 24) & 0xFF;
@@ -426,6 +493,7 @@ namespace LiveWall.Ink
             var parts = MovingParts(layers, m, w, h);
             if (parts.Count == 0) return false;
             var areas = parts.Select(p => new MovingArea(p.Key, p.Value)).ToList();
+            KeepMade(layers.SelectMany(kv => kv.Value).Where(Animated), m);
             bool timed = Timed, linear = InkRenderer.Linear;
             double time = Time;
             InkRenderer.Linear = true;
@@ -441,40 +509,35 @@ namespace LiveWall.Ink
                     }
                     Timed = true;
                     var drawing = new System.Diagnostics.Stopwatch();
+                    long firstFrame = 0;
                     bool ok = MediaWorker.EncodeFrames(outPath, w, h, Fps, Frames, (f, canvas) =>
                     {
                         drawing.Start();
                         Time = f / (double)Fps;
-                        using (var g = Graphics.FromImage(frame))
-                        using (var gc = Graphics.FromImage(canvas))
-                        {
-                            InkRenderer.Prepare(g);
-                            gc.CompositingMode = CompositingMode.SourceCopy;
-                            if (f == 0)
+                        if (f == 0)
+                            using (var g = Graphics.FromImage(frame))
                             {
-                                // The first frame whole (it is also the board picture).
+                                // The first frame whole (it is also the board picture); then its areas as every later
+                                // frame draws them, so the loop joins without a seam.
+                                InkRenderer.Prepare(g);
                                 g.CompositingMode = CompositingMode.SourceCopy;
                                 g.DrawImage(background, full, full, GraphicsUnit.Pixel);
                                 g.CompositingMode = CompositingMode.SourceOver;
                                 InkRenderer.DrawLayers(g, layers, m, w, h);
-                                gc.DrawImage(frame, full, full, GraphicsUnit.Pixel);
                             }
+                        foreach (var area in areas) area.Draw(frame, background, m);
+                        using (var gc = Graphics.FromImage(canvas))
+                        {
+                            gc.CompositingMode = CompositingMode.SourceCopy;
+                            if (f == 0) gc.DrawImage(frame, full, full, GraphicsUnit.Pixel);
                             else
-                                foreach (var area in areas)
-                                {
-                                    Rectangle r = area.Area;
-                                    g.SetClip(r);
-                                    g.CompositingMode = CompositingMode.SourceCopy;
-                                    g.DrawImage(background, r, r, GraphicsUnit.Pixel);
-                                    g.CompositingMode = CompositingMode.SourceOver;
-                                    area.Draw(g, m);
-                                    gc.DrawImage(frame, r, r, GraphicsUnit.Pixel);
-                                }
+                                foreach (var area in areas) gc.DrawImage(frame, area.Area, area.Area, GraphicsUnit.Pixel);
                         }
                         drawing.Stop();
+                        if (f == 0) firstFrame = drawing.ElapsedMilliseconds;
                     });
                     Log.Info("Board animation: " + parts.Count + " moving area(s), " + parts.Sum(p => p.Key.Width * p.Key.Height) / 1000 + " kpx, drawing " +
-                             drawing.ElapsedMilliseconds + " ms of the encode");
+                             drawing.ElapsedMilliseconds + " ms of the encode (the first frame " + firstFrame + " ms)");
                     return ok;
                 }
             }
@@ -484,6 +547,7 @@ namespace LiveWall.Ink
                 Timed = timed;
                 Time = time;
                 InkRenderer.Linear = linear;
+                KeepMade(null, m);
                 ClearCache();
             }
         }
@@ -507,40 +571,49 @@ namespace LiveWall.Ink
             areas = areas.Where((r, i) => !areas.Where((o, j) => j != i && o.Contains(r) && (o != r || j < i)).Any()).ToList();
             return areas.Select(a => new KeyValuePair<Rectangle, List<KeyValuePair<InkLayerInfo, List<InkStroke>>>>(a,
                 layers.Select(kv => new KeyValuePair<InkLayerInfo, List<InkStroke>>(kv.Key,
-                    kv.Value.Where(s => s.Tool == InkTool.Erase || Rectangle.Round(m.ToTarget(s.Bounds)).IntersectsWith(a)).ToList())).ToList())).ToList();
+                    kv.Value.Where(s => Rectangle.Inflate(Rectangle.Round(m.ToTarget(s.Bounds)), 2, 2).IntersectsWith(a)).ToList())).ToList())).ToList();
         }
     }
 
-    // One area an animation changes, ready to draw moment after moment: per shown layer, the elements touching it in
-    // order, with the still ones between animated ones baked once into pictures of the area (drawing them again every
-    // frame, a still spray is thousands of dots). Laying them over each other is exact, as drawing in order would be,
-    // except when an eraser comes after an animated element: such a layer is drawn element by element.
+    // One area an animation changes, ready to draw moment after moment. Per shown layer, the elements touching it in order;
+    // the still runs between animated elements are baked once, and what never changes is laid together once: the
+    // background with every layer under the first animated one (`under`), and every layer over the last one (`over`).
+    // A frame is then `under`, the animated layers blended in plain pixels (animated elements straight from their made
+    // pixels, no GDI+), `over`. Exact, as drawing in order would be (all of it is plain premultiplied "over"), except
+    // when an eraser comes after an animated element: such a layer is drawn element by element.
     internal sealed class MovingArea : IDisposable
     {
         sealed class Piece
         {
-            public List<InkStroke> Still;   // drawn once into Baked
-            public Bitmap Baked;
+            public List<InkStroke> Still;   // baked once into Px
+            public int[] Px;
+            public Rectangle Box;           // where Px has anything (area pixels)
             public InkStroke Moving;        // or one animated element
         }
 
         sealed class Part
         {
             public InkLayerInfo Layer;
-            public List<InkStroke> All;     // drawn directly (an eraser after something animated)
+            public List<InkStroke> All;     // drawn whole each frame (an eraser after something animated)
             public List<Piece> Pieces;
+            public Rectangle Box;           // what the moving part can touch (area pixels)
         }
 
         public readonly Rectangle Area;
         readonly List<Part> parts = new List<Part>();
+        int first, last;                    // parts[first..last] move
+        int[] under, over, work, layer;
+        Rectangle overBox;
         Bitmap scratch;
 
         public MovingArea(Rectangle area, List<KeyValuePair<InkLayerInfo, List<InkStroke>>> layers)
         {
             Area = area;
+            first = -1;
+            last = -1;
             foreach (var kv in layers)
             {
-                if (kv.Value.Count == 0) continue;
+                if (kv.Value.Count == 0 || kv.Key.Opacity <= 0) continue;
                 var part = new Part { Layer = kv.Key };
                 bool movingSeen = false, direct = false;
                 foreach (var s in kv.Value)
@@ -560,61 +633,196 @@ namespace LiveWall.Ink
                         still.Still.Add(s);
                     }
                 }
+                if (movingSeen)
+                {
+                    if (first < 0) first = parts.Count;
+                    last = parts.Count;
+                }
                 parts.Add(part);
             }
         }
 
-        // Onto `g` (the target, already holding the background in the area), at InkGlow's current moment.
-        public void Draw(Graphics g, InkMapping m)
+        // Writes the area of `target` (same pixels as `background`) at InkGlow's current moment.
+        public void Draw(Bitmap target, Bitmap background, InkMapping m)
         {
-            if (scratch == null) scratch = new Bitmap(Area.Width, Area.Height, PixelFormat.Format32bppPArgb);
-            foreach (var part in parts)
+            int w = Area.Width, h = Area.Height, n = w * h;
+            if (under == null) Prepare(background, m);
+            if (work == null) work = new int[n];
+            Array.Copy(under, work, n);
+            for (int k = first; k >= 0 && k <= last; k++)
             {
-                using (var gs = Graphics.FromImage(scratch))
+                var part = parts[k];
+                bool straight = part.All == null && part.Layer.Opacity >= 100;
+                int[] into = work;
+                Rectangle box = part.Box;
+                if (!straight)
                 {
-                    gs.Clear(Color.Transparent);
-                    InkRenderer.Prepare(gs);
-                    if (part.All != null)
+                    if (layer == null) layer = new int[n];
+                    for (int y = box.Top; y < box.Bottom; y++) Array.Clear(layer, y * w + box.X, box.Width);
+                    into = layer;
+                }
+                if (part.All != null) Bake(part.All, m, layer);
+                else
+                    foreach (var p in part.Pieces)
                     {
-                        gs.TranslateTransform(-Area.X, -Area.Y);
-                        InkRenderer.DrawStrokes(gs, part.All, m);
+                        if (p.Moving == null) { Lay(into, p.Px, p.Box, 256); continue; }
+                        if (!InkGlow.BlendInto(into, w, h, Area.X, Area.Y, p.Moving, m))
+                        {
+                            // Too big to have been made: drawn the usual way.
+                            var one = new int[n];
+                            Bake(new List<InkStroke> { p.Moving }, m, one);
+                            Lay(into, one, new Rectangle(0, 0, w, h), 256);
+                        }
+                    }
+                if (!straight) Lay(work, layer, box, part.Layer.Opacity * 256 / 100);
+            }
+            if (over != null) Lay(work, over, overBox, 256);
+            var d = target.LockBits(Area, ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                for (int y = 0; y < h; y++) Marshal.Copy(work, y * w, d.Scan0 + y * d.Stride, w);
+            }
+            finally { target.UnlockBits(d); }
+        }
+
+        // Once: the background with the layers under the moving ones, the layers over them, the still runs between.
+        void Prepare(Bitmap background, InkMapping m)
+        {
+            int w = Area.Width, h = Area.Height, n = w * h;
+            var whole = new Rectangle(0, 0, w, h);
+            under = new int[n];
+            var d = background.LockBits(Area, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                for (int y = 0; y < h; y++) Marshal.Copy(d.Scan0 + y * d.Stride, under, y * w, w);
+            }
+            finally { background.UnlockBits(d); }
+            if (first < 0) { first = parts.Count; last = parts.Count - 1; }
+            var px = new int[n];
+            for (int k = 0; k < first; k++)
+            {
+                Bake(Strokes(parts[k]), m, px);
+                Lay(under, px, whole, parts[k].Layer.Opacity * 256 / 100);
+            }
+            // A plain first moving layer: its still start goes under too; a plain last one: its still end goes over.
+            if (first <= last && parts[first].All == null && parts[first].Layer.Opacity >= 100 && parts[first].Pieces[0].Still != null)
+            {
+                Bake(parts[first].Pieces[0].Still, m, px);
+                Lay(under, px, whole, 256);
+                parts[first].Pieces.RemoveAt(0);
+            }
+            var top = new List<KeyValuePair<List<InkStroke>, int>>();
+            if (first <= last && parts[last].All == null && parts[last].Layer.Opacity >= 100 && parts[last].Pieces.Count > 0 &&
+                parts[last].Pieces[parts[last].Pieces.Count - 1].Still != null)
+            {
+                top.Add(new KeyValuePair<List<InkStroke>, int>(parts[last].Pieces[parts[last].Pieces.Count - 1].Still, 100));
+                parts[last].Pieces.RemoveAt(parts[last].Pieces.Count - 1);
+            }
+            for (int k = last + 1; k < parts.Count; k++) top.Add(new KeyValuePair<List<InkStroke>, int>(Strokes(parts[k]), parts[k].Layer.Opacity));
+            if (top.Count > 0)
+            {
+                over = new int[n];
+                foreach (var t in top)
+                {
+                    Bake(t.Key, m, px);
+                    Lay(over, px, whole, t.Value * 256 / 100);
+                }
+                overBox = Used(over, w, h);
+                if (overBox.IsEmpty) over = null;
+            }
+            for (int k = first; k <= last; k++)
+            {
+                var part = parts[k];
+                if (part.All != null) { part.Box = whole; continue; }
+                Rectangle box = Rectangle.Empty;
+                foreach (var p in part.Pieces)
+                {
+                    Rectangle b;
+                    if (p.Moving != null)
+                    {
+                        b = Rectangle.Inflate(Rectangle.Round(m.ToTarget(p.Moving.Bounds)), 3, 3);
+                        b.Offset(-Area.X, -Area.Y);
+                        b.Intersect(whole);
                     }
                     else
-                        foreach (var p in part.Pieces)
-                        {
-                            if (p.Moving != null)
-                            {
-                                gs.TranslateTransform(-Area.X, -Area.Y);
-                                InkRenderer.DrawStroke(gs, p.Moving, m);
-                                gs.ResetTransform();
-                                continue;
-                            }
-                            if (p.Baked == null)
-                            {
-                                p.Baked = new Bitmap(Area.Width, Area.Height, PixelFormat.Format32bppPArgb);
-                                using (var gb = Graphics.FromImage(p.Baked))
-                                {
-                                    InkRenderer.Prepare(gb);
-                                    gb.TranslateTransform(-Area.X, -Area.Y);
-                                    InkRenderer.DrawStrokes(gb, p.Still, m);
-                                }
-                            }
-                            gs.DrawImage(p.Baked, new Rectangle(0, 0, Area.Width, Area.Height), 0, 0, Area.Width, Area.Height, GraphicsUnit.Pixel);
-                        }
+                    {
+                        p.Px = new int[n];
+                        Bake(p.Still, m, p.Px);
+                        b = p.Box = Used(p.Px, w, h);
+                        if (b.IsEmpty) p.Px = null;
+                    }
+                    if (!b.IsEmpty) box = box.IsEmpty ? b : Rectangle.Union(box, b);
                 }
-                var state = g.Save();
-                g.TranslateTransform(Area.X, Area.Y);
-                InkRenderer.DrawWithOpacity(g, scratch, new Rectangle(0, 0, Area.Width, Area.Height), part.Layer.Opacity);
-                g.Restore(state);
+                part.Pieces.RemoveAll(p => p.Moving == null && p.Px == null);
+                part.Box = box;
             }
+            if (scratch != null) { scratch.Dispose(); scratch = null; }
+        }
+
+        static List<InkStroke> Strokes(Part part)
+        {
+            if (part.All != null) return part.All;
+            var list = new List<InkStroke>();
+            foreach (var p in part.Pieces)
+                if (p.Moving != null) list.Add(p.Moving);
+                else list.AddRange(p.Still);
+            return list;
+        }
+
+        // The elements drawn (GDI+) on nothing, into `px` (area pixels).
+        void Bake(List<InkStroke> strokes, InkMapping m, int[] px)
+        {
+            int w = Area.Width, h = Area.Height;
+            if (scratch == null) scratch = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(scratch))
+            {
+                g.Clear(Color.Transparent);
+                InkRenderer.Prepare(g);
+                g.TranslateTransform(-Area.X, -Area.Y);
+                InkRenderer.DrawStrokes(g, strokes, m);
+            }
+            var d = scratch.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                for (int y = 0; y < h; y++) Marshal.Copy(d.Scan0 + y * d.Stride, px, y * w, w);
+            }
+            finally { scratch.UnlockBits(d); }
+        }
+
+        // `src` over `dst` in `box`, at `k`/256 strength.
+        void Lay(int[] dst, int[] src, Rectangle box, int k)
+        {
+            if (k <= 0) return;
+            int w = Area.Width;
+            for (int y = box.Top; y < box.Bottom; y++)
+                for (int i = y * w + box.Left, end = y * w + box.Right; i < end; i++)
+                {
+                    int p = src[i];
+                    if (p == 0) continue;
+                    dst[i] = InkGlow.Blend(k >= 256 ? p : InkGlow.Scale(p, k), dst[i]);
+                }
+        }
+
+        static Rectangle Used(int[] px, int w, int h)
+        {
+            int x0 = w, y0 = h, x1 = -1, y1 = -1;
+            for (int y = 0; y < h; y++)
+                for (int x = 0, o = y * w; x < w; x++)
+                    if (px[o + x] != 0)
+                    {
+                        if (x < x0) x0 = x; if (x > x1) x1 = x;
+                        if (y < y0) y0 = y; y1 = y;
+                    }
+            return x1 < 0 ? Rectangle.Empty : Rectangle.FromLTRB(x0, y0, x1 + 1, y1 + 1);
         }
 
         public void Dispose()
         {
             if (scratch != null) { scratch.Dispose(); scratch = null; }
+            under = over = work = layer = null;
             foreach (var part in parts)
                 if (part.Pieces != null)
-                    foreach (var p in part.Pieces) if (p.Baked != null) { p.Baked.Dispose(); p.Baked = null; }
+                    foreach (var p in part.Pieces) p.Px = null;
         }
     }
 }
